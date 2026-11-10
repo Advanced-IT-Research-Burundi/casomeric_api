@@ -38,37 +38,67 @@ class CreditController extends Controller
             return sendError("Vous n'avez pas la permission d'approuver ce crédit.", [], Response::HTTP_FORBIDDEN);
         }
         $credit = Credit::findOrFail($id);
-        if(auth()->user()->hasRole('gestionnaire') ){
+        $user = Auth::user();
+
+        // Étape 1 : un gestionnaire ne peut traiter qu'un crédit "en attente".
+        // Étape 2 : responsable / admin peuvent traiter "en attente" ou "attente responsable".
+        $allowed = $user->hasRole('gestionnaire')
+            ? $credit->isPending()
+            : ($credit->isPending() || $credit->isWaitingResponsable());
+
+        if (!$allowed) {
+            return sendError(
+                "Ce crédit ne peut pas être approuvé à cette étape (statut : {$credit->statut}).",
+                [],
+                Response::HTTP_UNPROCESSABLE_ENTITY
+            );
+        }
+
+        if($user->hasRole('gestionnaire') ){
+            $responsables = User::where('role', 'responsable')->get();
+            if ($responsables->isEmpty()) {
+                return sendError(
+                    "Aucun responsable n'est enregistré pour donner l'approbation finale.",
+                    [],
+                    Response::HTTP_UNPROCESSABLE_ENTITY
+                );
+            }
+
             $credit->update([
                 'statut' => 'en_cours',
                 ]
             );
-            $responsableEmail = User::where('role', 'responsable')->pluck('email')->toArray();
-            $responsableId = User::where('role', 'responsable')->first()->id;
+            $responsableEmail = $responsables->pluck('email')->toArray();
 
             Mail::to($responsableEmail )
-            ->cc($responsableEmail)
             ->send(new DemandeApprobation($credit->load('membre')));
-            Notification::addNotification(
-                'Une demande d\'approbation de crédit a été faite par ' . auth()->user()->name . ' pour le membre ' . $credit->membre->nom . ' ' . $credit->membre->prenom . ' pour un montant de ' . $credit->montant_demande . ' BIF',
-                    $responsableId,
-                'Demande d\'approbation de crédit',
-                'credit'
-            );
+            foreach ($responsables as $responsable) {
+                Notification::addNotification(
+                    'Une demande d\'approbation de crédit a été faite par ' . $user->name . ' pour le membre ' . $credit->membre->nom . ' ' . $credit->membre->prenom . ' pour un montant de ' . $credit->montant_demande . ' BIF',
+                    $responsable->id,
+                    'Demande d\'approbation de crédit',
+                    'credit'
+                );
+            }
 
-        }else{ 
+        }else{
             try {
                 DB::beginTransaction();
-                $this->generateEcheances($credit);
-                $credit->update([
+                // La date d'approbation doit être connue AVANT de générer les échéances :
+                // la première échéance tombe un mois après l'approbation.
+                $credit->fill([
                     'statut' => 'approuve',
                     'date_approbation' => now(),
                     'date_fin' => now()->addMonths($credit->duree_mois ?? 12),
                     'approved_by' => Auth::id(),
                     // Au moment de l'approbation, on considère que le montant accordé est celui demandé si non défini
-                    'montant_accorde' => $credit->montant_accorde > 0 ? $credit->montant_accorde : $credit->montant_demande,
-                    'montant_restant' => $credit->montant_total_rembourser,
+                    'montant_accorde' => $credit->capital(),
                 ]);
+                // Recalcul sur le montant accordé avant de créer les échéances.
+                $credit->recalculer();
+                $credit->montant_restant = $credit->montant_total_rembourser;
+                $credit->save();
+                $this->generateEcheances($credit->fresh());
 
                  Notification::addNotification(
                 'Approbation de crédit a été faite par ' . auth()->user()->name . ' pour le membre ' . $credit->membre->nom . ' ' . $credit->membre->prenom . ' pour un montant de ' . $credit->montant_demande . ' BIF',
@@ -96,6 +126,26 @@ class CreditController extends Controller
     {
         // Get Credit ID et update statut to refuser et send email to member
         $credit = Credit::findOrFail($id);
+        $user = Auth::user();
+
+        if (!$user->hasRoles(['admin', 'gestionnaire', 'responsable'])) {
+            return sendError("Vous n'avez pas la permission de refuser ce crédit.", [], Response::HTTP_FORBIDDEN);
+        }
+
+        // Même règle que l'approbation : le gestionnaire seulement sur "en attente",
+        // le responsable / admin aussi sur "attente responsable".
+        $allowed = $user->hasRole('gestionnaire')
+            ? $credit->isPending()
+            : ($credit->isPending() || $credit->isWaitingResponsable());
+
+        if (!$allowed) {
+            return sendError(
+                "Ce crédit ne peut plus être refusé (statut : {$credit->statut}).",
+                [],
+                Response::HTTP_UNPROCESSABLE_ENTITY
+            );
+        }
+
         $credit->update([
             'statut' => 'rejete',
             'rejected_by' => Auth::id(),
@@ -126,12 +176,12 @@ class CreditController extends Controller
         
         $Email_admin = User::where('role', 'admin')->orWhere('role', 'gestionnaire')->pluck('email')->toArray();
         
+        // Le membre choisit le montant, la durée et le motif. Le taux vient de la configuration
+        // et le total / la mensualité sont calculés ici : les valeurs envoyées par le navigateur sont ignorées.
         $request->validate([
-            'montant_demande' => 'required|numeric',
-            'taux_interet' => 'nullable|numeric',
-            'duree_mois' => 'required|numeric',
-            'montant_total_rembourser' => 'required|numeric',
-            'montant_mensualite' => 'required|numeric',
+            'montant_demande' => 'required|numeric|min:1|max:99999999',
+            'duree_mois' => 'required|integer|min:1|max:120',
+            'motif' => 'nullable|string',
         ]);
         
         try {
@@ -162,18 +212,19 @@ class CreditController extends Controller
         try {
             DB::beginTransaction();
             //code...
-            $tauxInteret = $request->taux_interet;
-            if (empty($tauxInteret)) {
-                $defaultTaux = Configuration::where('cle', 'taux_interet_credit')->value('valeur');
-                $tauxInteret = $defaultTaux ?? 3;
-            }
+            $tauxInteret = Credit::tauxParDefaut();
+            $calcul = Credit::calculerRemboursement(
+                (float) $request->montant_demande,
+                $tauxInteret,
+                (int) $request->duree_mois
+            );
 
             $credit = Credit::create([
                 'montant_demande' => $request->montant_demande,
                 'taux_interet' => $tauxInteret,
                 'duree_mois' => $request->duree_mois,
-                'montant_total_rembourser' => $request->montant_total_rembourser,
-                'montant_mensualite' => $request->montant_mensualite,
+                'montant_total_rembourser' => $calcul['montant_total_rembourser'],
+                'montant_mensualite' => $calcul['montant_mensualite'],
                 'membre_id' => $membre->id,
                 'created_by' => Auth::id(),
                 'statut' => 'en_attente',
@@ -242,16 +293,18 @@ class CreditController extends Controller
         //     );
         // }
         $data = $request->validated();
-        if (!isset($data['taux_interet']) || empty($data['taux_interet'])) {
-            $defaultTaux = Configuration::where('cle', 'taux_interet_credit')->value('valeur');
-            $data['taux_interet'] = $defaultTaux ?? 3;
+        if (!isset($data['taux_interet']) || $data['taux_interet'] === '' || $data['taux_interet'] === null) {
+            $data['taux_interet'] = Credit::tauxParDefaut();
         }
+        $data['montant_accorde'] = $data['montant_accorde'] ?? 0;
 
-        $credit = Credit::create(array_merge($data, [
+        $credit = new Credit(array_merge($data, [
             'created_by' => Auth::id(),
             'date_fin' => $date_fin,
             'user_id' => Auth::id(),
         ]));
+        // Total et mensualité toujours calculés par le serveur.
+        $credit->recalculer()->save();
         
         // Générer automatiquement les échéances pour ce crédit
         $this->generateEcheances($credit);
@@ -346,15 +399,50 @@ class CreditController extends Controller
     
     public function update(CreditUpdateRequest $request, Credit $credit)
     {
-        $credit->update($request->validated());
-        
+        if ($error = $this->denyUnlessEditable($credit, 'modifié')) {
+            return $error;
+        }
+
+        // Le statut et les dates de décision ne changent que par approuver / refuser,
+        // et le total / la mensualité sont toujours recalculés ici.
+        $data = collect($request->validated())
+            ->except(['statut', 'date_approbation', 'date_fin', 'montant_total_rembourser', 'montant_mensualite'])
+            ->reject(fn ($value, $key) => $value === null && in_array($key, ['montant_accorde', 'taux_interet']))
+            ->all();
+
+        $credit->fill($data)->recalculer()->save();
+
         return sendResponse($credit, 'Credit updated successfully.');
     }
     
     public function destroy(Request $request, Credit $credit)
     {
+        if ($error = $this->denyUnlessEditable($credit, 'supprimé')) {
+            return $error;
+        }
+
         $credit->delete();
         return response()->noContent();
+    }
+
+    /**
+     * Edit / delete: staff only, and only while nothing has been decided ("en attente").
+     */
+    private function denyUnlessEditable(Credit $credit, string $verb)
+    {
+        if (!Auth::user()->hasRoles(['admin', 'gestionnaire', 'responsable'])) {
+            return sendError("Vous n'avez pas la permission de modifier les crédits.", [], Response::HTTP_FORBIDDEN);
+        }
+
+        if (!$credit->isPending()) {
+            return sendError(
+                "Un crédit déjà traité ne peut plus être {$verb} (statut : {$credit->statut}).",
+                [],
+                Response::HTTP_UNPROCESSABLE_ENTITY
+            );
+        }
+
+        return null;
     }
     
     /**
@@ -368,6 +456,18 @@ class CreditController extends Controller
         ]);
 
         $credit = Credit::with('remboursements')->findOrFail($id);
+
+        if (!Auth::user()->hasRoles(['admin', 'gestionnaire', 'responsable'])) {
+            return sendError("Vous n'avez pas la permission d'enregistrer un paiement.", [], Response::HTTP_FORBIDDEN);
+        }
+
+        if (!$credit->isInRepayment()) {
+            return sendError(
+                "Ce crédit n'est pas en remboursement (statut : {$credit->statut}).",
+                [],
+                Response::HTTP_UNPROCESSABLE_ENTITY
+            );
+        }
 
         $montantAPayer = (float) $request->montant_paye;
 
@@ -465,11 +565,14 @@ class CreditController extends Controller
             $montantMensualite = $credit->montant_mensualite;
             $dateDepart = $credit->date_approbation ?? $credit->date_demande ?? now();
             
+            // La dernière échéance absorbe l'écart d'arrondi : la somme des échéances = total à rembourser.
+            $montantDerniere = $credit->montant_total_rembourser - $montantMensualite * ($duree - 1);
+
             for ($i = 1; $i <= $duree; $i++) {
                 Remboursement::create([
                     'credit_id' => $credit->id,
                     'numero_echeance' => $i,
-                    'montant_prevu' => $montantMensualite,
+                    'montant_prevu' => $i === $duree ? $montantDerniere : $montantMensualite,
                     'montant_paye' => 0,
                     'date_echeance' => $dateDepart->copy()->addMonths($i),
                     'date_paiement' => null,

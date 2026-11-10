@@ -9,6 +9,8 @@ use App\Models\Remboursement;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Http\Response;
+use Illuminate\Support\Carbon;
+use Illuminate\Support\Facades\Auth;
 
 class RemboursementController extends Controller
 {
@@ -63,6 +65,9 @@ class RemboursementController extends Controller
         if (!$credit) {
             return sendError("Crédit non trouvé.", [], Response::HTTP_NOT_FOUND);
         }
+        if ($error = $this->denyUnlessCanRecordPayment($credit)) {
+            return $error;
+        }
         try {
             DB::beginTransaction();
             $remboursement = Remboursement::create($request->validated());
@@ -94,6 +99,10 @@ class RemboursementController extends Controller
 
     public function update(RemboursementUpdateRequest $request, Remboursement $remboursement)
     {
+        if ($error = $this->denyUnlessStaff()) {
+            return $error;
+        }
+
         $remboursement->update($request->validated());
 
         return sendResponse($remboursement, 'Remboursement mis à jour avec succès');
@@ -101,6 +110,10 @@ class RemboursementController extends Controller
 
     public function destroy(Request $request, Remboursement $remboursement)
     {
+        if ($error = $this->denyUnlessStaff()) {
+            return $error;
+        }
+
         $remboursement->delete();
 
         return response()->noContent();
@@ -117,6 +130,10 @@ class RemboursementController extends Controller
             'preuve_paiement' => 'required|file|mimes:jpeg,png,jpg,pdf|max:2048',
         ]);
 
+        if ($error = $this->denyUnlessCanRecordPayment($remboursement->credit)) {
+            return $error;
+        }
+
         $path = null;
         if ($request->hasFile('preuve_paiement') && $request->file('preuve_paiement')->isValid()) {
             $file = $request->file('preuve_paiement');
@@ -126,7 +143,10 @@ class RemboursementController extends Controller
         }
 
         $montantPaye = $request->input('montant_paye', $remboursement->montant_prevu);
-        $datePaiement = $request->input('date_paiement', now());
+        // The request sends a date as text: turn it into a date before comparing.
+        $datePaiement = $request->filled('date_paiement')
+            ? Carbon::parse($request->input('date_paiement'))
+            : now();
 
         // Mettre à jour le statut (en retard si paiement après la date d'échéance)
         $statut = 'paye';
@@ -154,5 +174,37 @@ class RemboursementController extends Controller
         $credit->save();
 
         return sendResponse($remboursement->fresh(), 'Échéance approuvée (payée) avec succès');
+    }
+
+    /**
+     * Only staff can record or change repayments.
+     */
+    private function denyUnlessStaff()
+    {
+        if (!Auth::user()?->hasRoles(['admin', 'gestionnaire', 'responsable'])) {
+            return sendError("Vous n'avez pas la permission de gérer les remboursements.", [], Response::HTTP_FORBIDDEN);
+        }
+
+        return null;
+    }
+
+    /**
+     * A repayment can only be recorded by staff, on a credit that is granted and not finished.
+     */
+    private function denyUnlessCanRecordPayment(?Credit $credit)
+    {
+        if ($error = $this->denyUnlessStaff()) {
+            return $error;
+        }
+
+        if (!$credit || !$credit->isInRepayment()) {
+            return sendError(
+                "Ce crédit n'est pas en remboursement (statut : " . ($credit->statut ?? 'inconnu') . ").",
+                [],
+                Response::HTTP_UNPROCESSABLE_ENTITY
+            );
+        }
+
+        return null;
     }
 }

@@ -21,16 +21,18 @@ class CreditUpdateRequest extends FormRequest
     {
         return [
             'membre_id' => ['required', 'integer', 'exists:membres,id'],
-            'montant_demande' => ['required', 'numeric', 'between:-99999999.99,99999999.99'],
-            'montant_accorde' => ['required', 'numeric', 'between:-99999999.99,99999999.99'],
-            'taux_interet' => ['required', 'numeric', 'between:-999.99,999.99'],
-            'duree_mois' => ['required', 'integer'],
-            'montant_total_rembourser' => ['required', 'numeric', 'between:-99999999.99,99999999.99'],
-            'montant_mensualite' => ['required', 'numeric', 'between:-99999999.99,99999999.99'],
+            'montant_demande' => ['required', 'numeric', 'min:1', 'max:99999999'],
+            'montant_accorde' => ['nullable', 'numeric', 'min:0', 'max:99999999'],
+            'taux_interet' => ['nullable', 'numeric', 'min:0', 'max:100'],
+            'duree_mois' => ['required', 'integer', 'min:1', 'max:120'],
+            // Calculés par le serveur (Credit::calculerRemboursement) : valeur envoyée ignorée.
+            'montant_total_rembourser' => ['nullable', 'numeric'],
+            'montant_mensualite' => ['nullable', 'numeric'],
             'date_demande' => ['required', 'date'],
-            'date_approbation' => ['required', 'date'],
+            'date_approbation' => ['nullable', 'date'],
             'date_fin' => ['nullable', 'date'],
-            'statut' => ['required', 'in:en_attente,approuve,rejete,en_cours,termine'],
+            // Ignorés à la modification : le statut change seulement par approuver / refuser.
+            'statut' => ['nullable', 'in:en_attente,approuve,rejete,en_cours,termine'],
             'motif' => ['required', 'string'],
             'commentaire' => ['nullable', 'string'],
         ];

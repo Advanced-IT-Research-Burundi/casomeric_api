@@ -88,5 +88,75 @@ class Credit extends Model
         return $this->hasMany(Remboursement::class);
     }
 
-   // public static function 
+    /**
+     * Single source of truth for a credit's cost (simple interest, same formula as the UI):
+     *   intérêt     = capital × taux × durée / (12 × 100)   (taux = % par an)
+     *   total       = capital + intérêt                      (arrondi au franc)
+     *   mensualité  = total / durée                          (arrondi au franc)
+     * The last installment absorbs the rounding difference (CreditController::generateEcheances).
+     *
+     * @return array{montant_interet: float, montant_total_rembourser: float, montant_mensualite: float}
+     */
+    public static function calculerRemboursement(float $capital, float $tauxAnnuel, int $dureeMois): array
+    {
+        $dureeMois = max(1, $dureeMois);
+        $interet = $capital * $tauxAnnuel * $dureeMois / (12 * 100);
+        $total = round($capital + $interet);
+
+        return [
+            'montant_interet' => round($interet),
+            'montant_total_rembourser' => $total,
+            'montant_mensualite' => round($total / $dureeMois),
+        ];
+    }
+
+    /** Default yearly rate from the configuration (taux_interet_credit), 3 % if not set. */
+    public static function tauxParDefaut(): float
+    {
+        $valeur = Configuration::where('cle', 'taux_interet_credit')->value('valeur');
+
+        return is_numeric($valeur) ? (float) $valeur : 3.0;
+    }
+
+    /** Capital the interest is computed on: the granted amount once set, otherwise the requested one. */
+    public function capital(): float
+    {
+        return (float) ($this->montant_accorde > 0 ? $this->montant_accorde : $this->montant_demande);
+    }
+
+    /** Recompute total and monthly payment from capital, rate and duration (not saved). */
+    public function recalculer(): static
+    {
+        $this->fill(array_intersect_key(
+            self::calculerRemboursement($this->capital(), (float) $this->taux_interet, (int) $this->duree_mois),
+            array_flip(['montant_total_rembourser', 'montant_mensualite'])
+        ));
+
+        return $this;
+    }
+
+    /*
+     * Workflow helpers (same rules as the credits list in the UI).
+     * "en_cours" is used both for "sent to the responsable" (no approval date yet)
+     * and for "being repaid" (approval date set).
+     */
+
+    /** Requested, nothing decided yet. */
+    public function isPending(): bool
+    {
+        return $this->statut === 'en_attente';
+    }
+
+    /** Approved by a gestionnaire, waiting for the responsable's final approval. */
+    public function isWaitingResponsable(): bool
+    {
+        return $this->statut === 'en_cours' && empty($this->date_approbation);
+    }
+
+    /** Granted and not fully repaid yet. */
+    public function isInRepayment(): bool
+    {
+        return $this->statut === 'approuve'
+            || ($this->statut === 'en_cours' && !empty($this->date_approbation));
+    }
 }
