@@ -2,55 +2,63 @@
 
 namespace App\Mail;
 
+use App\Models\User;
 use Illuminate\Bus\Queueable;
-use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Mail\Mailable;
 use Illuminate\Mail\Mailables\Content;
 use Illuminate\Mail\Mailables\Envelope;
 use Illuminate\Queue\SerializesModels;
 
-class WelcomEmail extends Mailable implements ShouldQueue
+/**
+ * Welcome email for a new CASOMIREC account.
+ *
+ * - With a $token (account created by an admin): contains the link to
+ *   define the first password, then the login link.
+ * - Without a token (user registered and chose a password): login link only.
+ *
+ * Sent in the background by App\Jobs\SendWelcomeMailJob (not ShouldQueue
+ * itself, so the token stays inside the encrypted job payload).
+ */
+class WelcomEmail extends Mailable
 {
     use Queueable, SerializesModels;
-    public $user;
 
-    /**
-     * Create a new message instance.
-     */
-    public function __construct($user)
+    public ?string $setPasswordUrl;
+
+    public string $loginUrl;
+
+    public int $expireMinutes;
+
+    public function __construct(public User $user, ?string $token = null)
     {
-        //
-        $this->user = $user;
+        $this->setPasswordUrl = $token ? ForgotPasswordMail::buildResetUrl($user, $token) : null;
+        $this->loginUrl = rtrim(config('app.frontend_url'), '/').'/login';
+        $this->expireMinutes = (int) config('auth.passwords.'.config('auth.defaults.passwords').'.expire', 60);
     }
 
-    /**
-     * Get the message envelope.
-     */
     public function envelope(): Envelope
     {
         return new Envelope(
-            subject: 'Welcom  to CASOMIREC',
+            subject: 'Bienvenue à CASOMIREC',
         );
     }
 
-    /**
-     * Get the message content definition.
-     */
     public function content(): Content
     {
+        $hours = intdiv($this->expireMinutes, 60);
+
         return new Content(
             view: 'emails.welcome',
             with: [
-                "user" => $this->user,
-            ]
+                'user' => $this->user,
+                'setPasswordUrl' => $this->setPasswordUrl,
+                'loginUrl' => $this->loginUrl,
+                'forgotUrl' => rtrim(config('app.frontend_url'), '/').'/forgot-password',
+                'validity' => $hours >= 1 ? $hours.' heure(s)' : $this->expireMinutes.' minutes',
+            ],
         );
     }
 
-    /**
-     * Get the attachments for the message.
-     *
-     * @return array<int, \Illuminate\Mail\Mailables\Attachment>
-     */
     public function attachments(): array
     {
         return [];

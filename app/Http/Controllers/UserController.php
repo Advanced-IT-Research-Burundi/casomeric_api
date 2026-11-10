@@ -3,20 +3,26 @@
 namespace App\Http\Controllers;
 
 use App\Http\Controllers\Controller;
-use App\Mail\WelcomEmail;
+use App\Jobs\SendForgotPasswordMailJob;
+use App\Jobs\SendPasswordResetSuccessMailJob;
+use App\Jobs\SendWelcomeMailJob;
 use App\Models\Membre;
 use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Auth\Events\PasswordReset;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\Password as PasswordFacade;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\Facades\Validator;
 use Illuminate\Validation\Rules\Password;
 use Illuminate\Validation\ValidationException;
 use Laravel\Sanctum\PersonalAccessToken;
+use Illuminate\Support\Str;
 
 use function PHPSTORM_META\map;
 
@@ -119,7 +125,8 @@ class UserController extends Controller
                 'user_id' => $user->id,
             ]);
 
-            Mail::to($user->email)->queue(new WelcomEmail($user));
+            // Self-registration: the user already chose a password, so the email only links to login.
+            SendWelcomeMailJob::dispatch($user);
             DB::commit();
         } catch (\Throwable $th) {
             DB::rollBack();
@@ -457,6 +464,82 @@ class UserController extends Controller
                 'error' => config('app.debug') ? $e->getMessage() : 'Erreur interne du serveur'
             ], 500);
         }
+    }
+
+    public function sendPasswordResetLink(Request $request): JsonResponse
+    {
+        $request->validate([
+            'email' => ['required', 'email'],
+        ]);
+
+        try {
+            // The broker creates the token and handles throttling; the email is sent by a queued job.
+            $status = PasswordFacade::sendResetLink(
+                $request->only('email'),
+                function (User $user, string $token): void {
+                    SendForgotPasswordMailJob::dispatch($user, $token);
+                }
+            );
+        } catch (\Throwable $exception) {
+            Log::error('Password reset link email could not be queued.', [
+                'exception' => $exception->getMessage(),
+            ]);
+
+            return sendError(
+                'Impossible d’envoyer le lien pour le moment. Veuillez réessayer plus tard.',
+                [],
+                502
+            );
+        }
+
+        if ($status === PasswordFacade::RESET_THROTTLED) {
+            return sendError('Veuillez patienter avant de demander un nouveau lien.', [], 429);
+        }
+
+        return sendResponse(null, 'Un lien de réinitialisation a été envoyé si cette adresse correspond à un compte.');
+    }
+
+    public function resetPassword(Request $request): JsonResponse
+    {
+        $request->validate([
+            'token' => ['required', 'string'],
+            'email' => ['required', 'email'],
+            'password' => ['required', 'confirmed', Password::defaults()],
+        ]);
+
+        $status = PasswordFacade::reset(
+            $request->only('email', 'password', 'password_confirmation', 'token'),
+            function (User $user, string $password): void {
+                $user->forceFill([
+                    'password' => Hash::make($password),
+                    'remember_token' => Str::random(60),
+                ])->save();
+
+                event(new PasswordReset($user));
+            }
+        );
+
+        if ($status !== PasswordFacade::PASSWORD_RESET) {
+            return sendError(
+                'Le lien de réinitialisation est invalide ou expiré. Demandez un nouveau lien.',
+                ['email' => [__($status)]],
+                422
+            );
+        }
+
+        // The password is already saved: a failed confirmation email must not fail the request.
+        try {
+            $user = User::where('email', $request->input('email'))->first();
+            if ($user) {
+                SendPasswordResetSuccessMailJob::dispatch($user);
+            }
+        } catch (\Throwable $exception) {
+            Log::warning('Password reset confirmation email could not be queued.', [
+                'exception' => $exception->getMessage(),
+            ]);
+        }
+
+        return sendResponse(null, 'Votre mot de passe a été défini avec succès.');
     }
 
     // ===== METTRE À JOUR LE PROFIL =====

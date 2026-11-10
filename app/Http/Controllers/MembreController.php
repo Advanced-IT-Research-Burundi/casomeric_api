@@ -7,8 +7,15 @@ use App\Http\Requests\MembreUpdateRequest;
 
 use App\Http\Resources\MembreCollection;
 use App\Http\Resources\MembreResource;
+use App\Jobs\SendWelcomeMailJob;
 use App\Models\Membre;
+use App\Models\User;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Password;
+use Illuminate\Support\Str;
 
 class MembreController extends Controller
 {
@@ -79,10 +86,81 @@ class MembreController extends Controller
 
     public function store(MembreStoreRequest $request)
     {
+        $data = $request->validated();
+        $createUser = (bool) ($data['create_user'] ?? false);
+        unset($data['create_user']);
 
-        $membre = Membre::create($request->validated());
+        if ($createUser && !$request->user()?->isAdmin()) {
+            return sendError(
+                'Seul un administrateur peut créer un compte utilisateur pour un membre.',
+                [],
+                403
+            );
+        }
 
-        return sendResponse($membre, 'Membre créé avec succès');
+        $user = null;
+        $membre = DB::transaction(function () use (&$user, &$data, $createUser) {
+            if ($createUser) {
+                $user = User::create([
+                    'name' => $data['nom'] . ' ' . $data['prenom'],
+                    'nom' => $data['nom'],
+                    'prenom' => $data['prenom'],
+                    'email' => $data['email'],
+                    'telephone' => $data['telephone'],
+                    'password' => Hash::make(Str::random(64)),
+                    'role' => 'membre',
+                    'is_active' => true,
+                ]);
+
+                $data['user_id'] = $user->id;
+            }
+
+            return Membre::create($data);
+        });
+
+        if (!$createUser) {
+            return sendResponse($membre, 'Membre créé avec succès', 201);
+        }
+
+        try {
+            $status = Password::sendResetLink(
+                ['email' => $user->email],
+                function (User $user, string $token): void {
+                    // Welcome email with the "define your password" link, sent by the queue worker.
+                    SendWelcomeMailJob::dispatch($user, $token);
+                }
+            );
+        } catch (\Throwable $exception) {
+            Log::error('Password link email could not be queued for newly created member account.', [
+                'user_id' => $user->id,
+                'exception' => $exception->getMessage(),
+            ]);
+
+            return sendError(
+                'Le membre et son compte ont été créés, mais l’envoi du lien de définition du mot de passe n’a pas pu être programmé. Utilisez « Mot de passe oublié » pour réessayer.',
+                [],
+                502
+            );
+        }
+
+        if ($status !== Password::RESET_LINK_SENT) {
+            Log::warning('Password reset link was not sent for newly created member account.', [
+                'user_id' => $user->id,
+                'status' => $status,
+            ]);
+
+            return sendError(
+                'Le membre et son compte ont été créés, mais le lien de définition du mot de passe n’a pas pu être envoyé.',
+                ['password_reset' => [$status]],
+                $status === Password::RESET_THROTTLED ? 429 : 502
+            );
+        }
+
+        return sendResponse(
+            $membre->load('user'),
+            'Membre et compte utilisateur créés. Un e-mail de bienvenue avec le lien pour définir le mot de passe va être envoyé.',
+            201
+        );
     }
 
     public function show(Request $request, Membre $membre)

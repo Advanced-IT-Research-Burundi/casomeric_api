@@ -2,7 +2,6 @@
 
 namespace App\Providers;
 
-use App\Providers\ScrambleServiceProvider;
 use Illuminate\Support\ServiceProvider;
 
 class AppServiceProvider extends ServiceProvider
@@ -18,6 +17,9 @@ class AppServiceProvider extends ServiceProvider
 
     /**
      * Bootstrap any application services.
+     *
+     * Password emails are sent with App\Mail\ForgotPasswordMail and
+     * App\Mail\PasswordResetSuccessMail from the controllers.
      */
     public function boot(): void
     {

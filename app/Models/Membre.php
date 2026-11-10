@@ -29,24 +29,6 @@ class Membre extends Model
 
     protected $appends = ['full_name'];
 
-    public static function boot()
-    {
-        parent::boot();
-        static::creating(function ($membre) {
-            // Automatically set the user_id if not provided
-            if (!$membre->user_id) {
-                $membre->user_id = auth()->id();
-            }
-        });
-        static::updating(function ($membre) {
-            // Ensure the user_id is set on update
-            if (!$membre->user_id) {
-                $membre->user_id = auth()->id();
-            }
-        });
-    }
-
-
     /**
      * Get the attributes that should be cast.
      *
