@@ -9,6 +9,7 @@ use App\Models\Remboursement;
 use App\Models\Cotisation;
 use App\Models\CotisationMensuelle;
 use App\Models\Configuration;
+use App\Services\RemboursementService;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
@@ -107,61 +108,80 @@ class ImportationService
     }
 
     /**
-     * Create a new credit request in 'en_attente' status.
+     * Crédit déjà accordé hors de l'application (il apparaît pour la première fois dans le fichier
+     * de retenues). On le crée "approuve" avec ce qu'il reste à payer, pour pouvoir suivre la retenue.
+     *
+     * Colonnes du fichier : global = total du crédit, restant = reste après la retenue du mois,
+     * retenu = retenue du mois. Le reste AVANT la retenue vaut donc restant + retenu.
      */
-    private function createCreditRequest(Membre $membre, array $data, float $amount)
+    private function createImportedCredit(Membre $membre, array $data, float $retenu, string $date): ?Credit
     {
-        $defaultTaux = Configuration::where('cle', 'taux_interet_credit')->value('valeur') ?? 3;
+        $global = floatval($data['global'] ?? 0);
+        $restantApres = is_numeric($data['restant'] ?? null) ? floatval($data['restant']) : null;
+        $restantAvant = $restantApres !== null ? $restantApres + $retenu : $global;
+        $total = max($global, $restantAvant);
 
-        return Credit::create([
-                'membre_id' => $membre->id,
-            'montant_demande' => $amount,
-            'montant_accorde' => 0,
-                'taux_interet' => $defaultTaux,
-                'duree_mois' => 12,
-            'montant_total_rembourser' => 0,
-            'montant_mensualite' => 0,
-                'date_demande' => now(),
-            'statut' => 'approuve',
-                'created_by' => auth()->id() ?? $membre->user_id,
-                'user_id' => auth()->id() ?? $membre->user_id,
-            'montant_restant' => 0,
-            ]);
+        if ($total <= 0) {
+            return null;
         }
 
+        $dateImport = Carbon::parse($date)->endOfMonth();
+
+        $credit = new Credit([
+            'membre_id' => $membre->id,
+            'montant_demande' => $total,
+            'montant_accorde' => $total,
+            'taux_interet' => 0,                 // inconnu : le total vient déjà du fichier
+            'duree_mois' => $retenu > 0 ? max(1, (int) ceil($restantAvant / $retenu)) : 12,
+            'montant_total_rembourser' => $total,
+            'montant_mensualite' => $retenu,
+            'date_demande' => $dateImport,
+            'date_approbation' => $dateImport,
+            'statut' => 'approuve',
+            'motif' => 'Crédit importé (fichier de retenues)',
+            'created_by' => auth()->id() ?? $membre->user_id,
+            'user_id' => auth()->id() ?? $membre->user_id,
+        ]);
+        // montant_restant n'est pas "fillable" sur Credit : on le fixe directement.
+        $credit->montant_restant = $restantAvant;
+        $credit->save();
+
+        return $credit;
+    }
+
     /**
-     * Record a reimbursement and update credit balance.
-     * Inclut toutes les données d'importation.
+     * Paie la retenue du mois sur le crédit : répartie sur les échéances non payées,
+     * ou gardée comme ligne payée "hors échéancier" (avec les colonnes du fichier)
+     * si le crédit n'a pas d'échéancier.
      */
     private function handleRemboursement(Credit $credit, array $data, float $amount, string $date)
     {
-        // Ensure we don't overpay
-        $paymentAmount = min($amount, $credit->montant_restant);
+        // Ne jamais payer plus que ce qui reste dû.
+        $paymentAmount = min($amount, (float) $credit->montant_restant);
+        if ($paymentAmount <= 0) {
+            return;
+        }
 
-        // Extraire nom et prénom du champ name
         $nameParts = $this->extractNomPrenom($data['name'] ?? '');
 
-        Remboursement::create([
-            'credit_id' => $credit->id,
-            'matricule' => $data['matricule'] ?? null,
-            'nom' => $nameParts['nom'],
-            'prenom' => $nameParts['prenom'],
-            'nomero_dossier' => $data['nomero_dossier'] ?? null,
-            'global' => $data['global'] ?? null,
-            'regle' => $data['regle'] ?? null,
-            'restant' => $data['restant'] ?? null,
-            'retenu' => $data['retenu'] ?? null,
-            'numero_echeance' => $credit->remboursements()->count() + 1,
-            'montant_prevu' => $paymentAmount,
-            'montant_paye' => $paymentAmount,
-            'date_echeance' => Carbon::parse($date)->day(now()->day),
-            'date_paiement' => Carbon::parse($date)->day(now()->day),
-            'statut' => 'paye',
-            'penalite' => 0,
-            'is_import' => true,
-        ]);
-
-        $credit->decrement('montant_restant', $paymentAmount);
+        app(RemboursementService::class)->payerCredit(
+            $credit,
+            $paymentAmount,
+            Carbon::parse($date)->endOfMonth(),
+            null,
+            [
+                'matricule' => $data['matricule'] ?? null,
+                'nom' => $nameParts['nom'],
+                'prenom' => $nameParts['prenom'],
+                'nomero_dossier' => $data['nomero_dossier'] ?? null,
+                'global' => $data['global'] ?? null,
+                'regle' => $data['regle'] ?? null,
+                'restant' => $data['restant'] ?? null,
+                'retenu' => $data['retenu'] ?? null,
+                'is_import' => true,
+            ],
+            false, // déjà présent dans cotisation_mensuelles (table de l'import)
+        );
     }
 
     /**
@@ -206,25 +226,33 @@ class ImportationService
     }
 
     /**
-     * Process remboursement: gère le crédit et crée le remboursement.
+     * Process remboursement: trouve le crédit en cours de remboursement du membre
+     * (ou le crée s'il n'existe pas encore dans l'application) et paie la retenue
+     * du mois sur son échéancier via RemboursementService.
      */
     private function processRemboursement(Membre $membre, array $data, float $retenu, string $date)
     {
+        // Un crédit en remboursement est "approuve", ou "en_cours" avec une date d'approbation
+        // (anciennes données) : pas seulement "approuve" comme avant.
         $credit = Credit::where('membre_id', $membre->id)
-            ->where('statut', 'approuve')
             ->where('montant_restant', '>', 0)
+            ->where(function ($q) {
+                $q->where('statut', 'approuve')
+                    ->orWhere(function ($q) {
+                        $q->where('statut', 'en_cours')->whereNotNull('date_approbation');
+                    });
+            })
+            ->orderBy('date_approbation')
             ->lockForUpdate()
             ->first();
 
-        if ($credit) {
-            // Si un crédit actif existe, on enregistre le remboursement
-            $this->handleRemboursement($credit, $data, $retenu, $date);
-        } else {
-            // Sinon, on crée une demande de crédit basée sur le montant global
-            $globalAmount = floatval($data['global'] ?? 0);
-            if ($globalAmount > 0) {
-                $this->createCreditRequest($membre, $data, $globalAmount);
+        if (!$credit) {
+            $credit = $this->createImportedCredit($membre, $data, $retenu, $date);
+            if (!$credit) {
+                return;
             }
         }
+
+        $this->handleRemboursement($credit, $data, $retenu, $date);
     }
 }

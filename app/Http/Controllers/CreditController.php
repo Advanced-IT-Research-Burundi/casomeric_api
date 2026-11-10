@@ -15,6 +15,7 @@ use App\Models\Membre;
 use App\Models\Notification;
 use App\Models\User;
 use App\Models\Remboursement;
+use App\Services\RemboursementService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Mail;
@@ -314,6 +315,11 @@ class CreditController extends Controller
     
     public function index(Request $request)
     {
+        // The full list (with members' details) is for staff; members use "Mes crédits".
+        if (!Auth::user()->hasRoles(['admin', 'gestionnaire', 'responsable'])) {
+            return sendError("Vous n'avez pas accès à la liste des crédits. Consultez « Mes crédits ».", [], Response::HTTP_FORBIDDEN);
+        }
+
         $query = Credit::query()
             ->leftJoin('membres', 'credits.membre_id', '=', 'membres.id')
             ->select('credits.*');
@@ -377,6 +383,12 @@ class CreditController extends Controller
     
     public function show(Request $request, Credit $credit)
     {
+        // Staff, or the member the credit belongs to.
+        $user = Auth::user();
+        if (!$user->hasRoles(['admin', 'gestionnaire', 'responsable']) && $credit->membre?->user_id !== $user->id) {
+            return sendError("Vous n'avez pas accès à ce crédit.", [], Response::HTTP_FORBIDDEN);
+        }
+
         $credit->load(['membre', 'remboursements']);
         
         $totalPaye = $credit->remboursements->sum('montant_paye');
@@ -448,14 +460,15 @@ class CreditController extends Controller
     /**
      * Paiement libre : distribue un montant sur les échéances non payées.
      */
-    public function payer(Request $request, $id)
+    public function payer(Request $request, $id, RemboursementService $service)
     {
         $request->validate([
             'montant_paye' => 'required|numeric|min:1',
+            'date_paiement' => 'nullable|date',
             'preuve_paiement' => 'required|file|mimes:jpeg,png,jpg,pdf|max:2048',
         ]);
 
-        $credit = Credit::with('remboursements')->findOrFail($id);
+        $credit = Credit::findOrFail($id);
 
         if (!Auth::user()->hasRoles(['admin', 'gestionnaire', 'responsable'])) {
             return sendError("Vous n'avez pas la permission d'enregistrer un paiement.", [], Response::HTTP_FORBIDDEN);
@@ -469,85 +482,20 @@ class CreditController extends Controller
             );
         }
 
-        $montantAPayer = (float) $request->montant_paye;
-
-        if ($montantAPayer > $credit->montant_restant) {
-            return sendError("Le montant dépasse le montant restant du crédit.", [], Response::HTTP_BAD_REQUEST);
+        if ((float) $request->montant_paye > (float) $credit->montant_restant + 0.009) {
+            return sendError("Le montant dépasse le montant restant du crédit.", [], Response::HTTP_UNPROCESSABLE_ENTITY);
         }
 
-        // Upload de la preuve de paiement
-        $path = null;
-        if ($request->hasFile('preuve_paiement') && $request->file('preuve_paiement')->isValid()) {
-            $file = $request->file('preuve_paiement');
-            $filename = time() . '_' . $file->getClientOriginalName();
-            $file->move(public_path('uploads/preuves_paiements'), $filename);
-            $path = 'uploads/preuves_paiements/' . $filename;
-        }
+        // Répartition sur les échéances non payées, mise à jour du restant / statut,
+        // et trace dans cotisation_mensuelles : tout est fait par RemboursementService.
+        $credit = $service->payerCredit(
+            $credit,
+            (float) $request->montant_paye,
+            $request->filled('date_paiement') ? Carbon::parse($request->date_paiement) : now(),
+            RemboursementService::stockerPreuve($request->file('preuve_paiement')),
+        );
 
-        try {
-            DB::beginTransaction();
-
-            // Récupérer les échéances non payées triées par numéro
-            $echeancesNonPayees = $credit->remboursements()
-                ->where('statut', '!=', 'paye')
-                ->orderBy('numero_echeance', 'asc')
-                ->get();
-
-            $montantRestant = $montantAPayer;
-
-            foreach ($echeancesNonPayees as $echeance) {
-                if ($montantRestant <= 0) {
-                    break;
-                }
-
-                $montantDu = $echeance->montant_prevu - ($echeance->montant_paye ?? 0);
-
-                if ($montantRestant >= $montantDu) {
-                    // Paiement complet de cette échéance
-                    $echeance->montant_paye = $echeance->montant_prevu;
-                    $echeance->statut = 'paye';
-                    $echeance->date_paiement = now();
-                    $echeance->preuve_paiement = $path;
-                    $montantRestant -= $montantDu;
-                } else {
-                    // Paiement partiel
-                    $echeance->montant_paye = ($echeance->montant_paye ?? 0) + $montantRestant;
-                    $echeance->preuve_paiement = $path;
-                    // Reste en attente ou en retard selon le cas
-                    $montantRestant = 0;
-                }
-
-                $echeance->save();
-            }
-
-            // Mettre à jour le montant restant du crédit
-            $totalPaye = $credit->remboursements()->sum('montant_paye');
-            $credit->montant_restant = max(0, $credit->montant_total_rembourser - $totalPaye);
-            $credit->statut = $credit->montant_restant <= 0 ? 'termine' : $credit->statut;
-            $credit->save();
-
-            // enregistre dans la table paiement 
-
-             $cotisationMensuelle = CotisationMensuelle::create([
-            'name' => $credit->membre?->nom . ' ' . $credit->membre?->prenom,
-            'matricule' => $credit->membre?->matricule,
-            'nomero_dossier' => $credit->membre?->nomero_dossier,
-            'global' => $credit->montant,
-            'regle' => $credit->montant,
-            'restant' => $credit->montant,
-            'retenu' => $credit->montant,
-            'date_cotisation' => $credit->date_paiement,
-            'user_id' => auth()->user()->id,
-            'type' => 'CREDIT'
-        ]);
-
-            DB::commit();
-
-            return sendResponse($credit->fresh()->load('remboursements'), 'Paiement effectué et distribué avec succès.');
-        } catch (\Throwable $th) {
-            DB::rollBack();
-            return sendError("Erreur lors du paiement : " . $th->getMessage(), [], Response::HTTP_INTERNAL_SERVER_ERROR);
-        }
+        return sendResponse($credit, 'Paiement effectué et distribué avec succès.');
     }
 
     /**

@@ -157,6 +157,11 @@ class DatabaseSeeder extends Seeder
                 'description' => 'Taux d’intérêt par défaut pour les crédits (en %)'
             ],
             [
+                'cle' => 'solde_initial_caisse',
+                'valeur' => '0',
+                'description' => 'Argent déjà présent dans la caisse avant l’utilisation de l’application (en BIF)'
+            ],
+            [
                 'cle' => 'nom_organisation',
                 'valeur' => 'CASOMERIC',
                 'description' => 'Nom de l’organisation'

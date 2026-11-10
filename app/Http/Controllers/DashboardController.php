@@ -44,9 +44,8 @@ class DashboardController extends Controller
             $tauxRecouvrement = round(($totalRembourse / $baseRecouvrement) * 100, 2);
         }
 
-        // Solde disponible (approx): total cotisations - (total credits + total assistances)
-        $totalAssistances = Assistance::sum('montant');
-        $soldeDisponible = $cotisationsCumulees - ($creditsTotal + $totalAssistances);
+        // Solde de la caisse : même calcul que pour les versements d'assistance (CaisseService).
+        $soldeDisponible = app(\App\Services\CaisseService::class)->solde();
 
         // Charts data
         // last 12 months for cotisations & tendance

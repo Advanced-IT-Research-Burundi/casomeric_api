@@ -78,6 +78,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::apiResource('assistances', AssistanceController::class);
     Route::post('assistances/approuve/{id}', [AssistanceController::class, 'approuve']);
     Route::post('assistances/rejete/{id}', [AssistanceController::class, 'refuser']);
+    Route::post('assistances/{id}/verser', [AssistanceController::class, 'verser']);
+    Route::get('caisse', [\App\Http\Controllers\CaisseController::class, 'show']);
     Route::apiResource('transactions', TransactionController::class);
     Route::prefix('rapports')->group(function () {
         Route::get('credits', [RapportController::class, 'getCreditReport']);

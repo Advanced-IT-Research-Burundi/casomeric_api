@@ -19,15 +19,17 @@ class AssistanceStoreRequest extends FormRequest
      */
     public function rules(): array
     {
+        // Statut et dates de décision : ignorés ici, ils changent par approuver / refuser / verser.
         return [
             'membre_id' => ['required', 'integer', 'exists:membres,id'],
             'type_assistance_id' => ['required', 'integer', 'exists:type_assistances,id'],
-            'montant' => ['required', 'numeric'],
-            'date_demande' => ['required', 'date'],
+            'montant' => ['required', 'numeric', 'min:1', 'max:99999999'],
+            'date_demande' => ['nullable', 'date'],
+            'motif' => ['nullable', 'string', 'max:2000'],
+            'justificatif' => ['required', 'file', 'mimes:jpeg,png,jpg,webp,pdf', 'max:5120'],
             'date_approbation' => ['nullable', 'date'],
             'date_versement' => ['nullable', 'date'],
-            'statut' => ['required', 'in:en_attente,approuve,rejete,verse'],
-            'justificatif' => ['nullable'], // Handle manually or as file
+            'statut' => ['nullable', 'in:en_attente,en_cours,approuve,rejete,verse'],
             'motif_rejet' => ['nullable', 'string'],
         ];
     }

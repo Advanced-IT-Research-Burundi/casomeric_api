@@ -6,6 +6,7 @@ use App\Http\Requests\RemboursementStoreRequest;
 use App\Http\Requests\RemboursementUpdateRequest;
 use App\Models\Credit;
 use App\Models\Remboursement;
+use App\Services\RemboursementService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Http\Response;
@@ -58,9 +59,12 @@ class RemboursementController extends Controller
         return sendResponse($remboursements, 'Remboursements récupérés avec succès');
     }
 
-    public function store(RemboursementStoreRequest $request)
+    /**
+     * Remboursement manuel : un montant payé sur un crédit, réparti sur les échéances
+     * non payées (comme le paiement global). Plus de ligne ajoutée à côté de l'échéancier.
+     */
+    public function store(RemboursementStoreRequest $request, RemboursementService $service)
     {
-        // Seach Credit ID 
         $credit = Credit::find($request->credit_id);
         if (!$credit) {
             return sendError("Crédit non trouvé.", [], Response::HTTP_NOT_FOUND);
@@ -68,28 +72,15 @@ class RemboursementController extends Controller
         if ($error = $this->denyUnlessCanRecordPayment($credit)) {
             return $error;
         }
-        try {
-            DB::beginTransaction();
-            $remboursement = Remboursement::create($request->validated());
 
-            if($request->montant_paye >  $credit->montant_restant){
-               throw new \Exception("Le montant payé dépasse le montant restant du crédit.");
-            }
-            $credit->montant_restant -= $remboursement->montant_paye;
-           
-            if ($credit->montant_restant <= 0) {
-                $credit->statut = 'termine';
-                
-            }
-             $credit->save();
+        $credit = $service->payerCredit(
+            $credit,
+            (float) $request->montant_paye,
+            $request->filled('date_paiement') ? Carbon::parse($request->date_paiement) : now(),
+            RemboursementService::stockerPreuve($request->file('preuve_paiement')),
+        );
 
-            DB::commit();
-        } catch (\Exception $e) {
-            DB::rollBack();
-            return sendError($e->getMessage());
-        }
-
-        return sendResponse($remboursement, 'Remboursement créé avec succès', 201);
+        return sendResponse($credit, 'Remboursement enregistré avec succès', 201);
     }
 
     public function show(Request $request, Remboursement $remboursement)
@@ -122,10 +113,10 @@ class RemboursementController extends Controller
     /**
      * Permet à un administrateur de marquer une échéance comme payée.
      */
-    public function approve(Request $request, Remboursement $remboursement)
+    public function approve(Request $request, Remboursement $remboursement, RemboursementService $service)
     {
         $request->validate([
-            'montant_paye' => 'nullable|numeric|min:0',
+            'montant_paye' => 'nullable|numeric|min:1',
             'date_paiement' => 'nullable|date',
             'preuve_paiement' => 'required|file|mimes:jpeg,png,jpg,pdf|max:2048',
         ]);
@@ -134,46 +125,25 @@ class RemboursementController extends Controller
             return $error;
         }
 
-        $path = null;
-        if ($request->hasFile('preuve_paiement') && $request->file('preuve_paiement')->isValid()) {
-            $file = $request->file('preuve_paiement');
-            $filename = time() . '_' . $file->getClientOriginalName();
-            $file->move(public_path('uploads/preuves_paiements'), $filename);
-            $path = 'uploads/preuves_paiements/' . $filename;
+        if ($remboursement->statut === 'paye') {
+            return sendError("L'échéance n° {$remboursement->numero_echeance} est déjà payée.", [], Response::HTTP_UNPROCESSABLE_ENTITY);
         }
 
-        $montantPaye = $request->input('montant_paye', $remboursement->montant_prevu);
-        // The request sends a date as text: turn it into a date before comparing.
-        $datePaiement = $request->filled('date_paiement')
-            ? Carbon::parse($request->input('date_paiement'))
-            : now();
+        // Sans montant : on paie tout ce qui reste dû sur l'échéance.
+        // Un montant plus petit laisse l'échéance ouverte (paiement partiel).
+        $service->payerEcheance(
+            $remboursement,
+            $request->filled('montant_paye') ? (float) $request->montant_paye : null,
+            $request->filled('date_paiement') ? Carbon::parse($request->input('date_paiement')) : now(),
+            RemboursementService::stockerPreuve($request->file('preuve_paiement')),
+        );
 
-        // Mettre à jour le statut (en retard si paiement après la date d'échéance)
-        $statut = 'paye';
-        $penalite = $remboursement->penalite ?? 0;
+        $remboursement->refresh();
+        $message = $remboursement->statut === 'paye'
+            ? 'Échéance payée avec succès'
+            : 'Paiement partiel enregistré : il reste '.number_format($service->resteDu($remboursement), 0, ',', ' ').' BIF sur cette échéance';
 
-        if ($datePaiement->greaterThan($remboursement->date_echeance)) {
-            $statut = 'paye';
-            // Ici vous pouvez appliquer une logique de calcul de pénalité si nécessaire
-        }
-
-        $remboursement->update([
-            'montant_paye' => $montantPaye,
-            'date_paiement' => $datePaiement,
-            'statut' => $statut,
-            'penalite' => $penalite,
-            'preuve_paiement' => $path,
-        ]);
-
-        // Mettre à jour le crédit lié
-        $credit = $remboursement->credit()->with('remboursements')->first();
-
-        $totalPaye = $credit->remboursements->sum('montant_paye');
-        $credit->montant_restant = max(0, $credit->montant_total_rembourser - $totalPaye);
-        $credit->statut = $credit->montant_restant <= 0 ? 'termine' : 'en_cours';
-        $credit->save();
-
-        return sendResponse($remboursement->fresh(), 'Échéance approuvée (payée) avec succès');
+        return sendResponse($remboursement, $message);
     }
 
     /**
