@@ -8,6 +8,7 @@ use App\Http\Resources\AssistanceResource;
 use App\Http\Resources\TypeAssistanceResource;
 use App\Mail\AccepteAssistance;
 use App\Mail\AssistanceCreate;
+use App\Mail\AssistanceVersee;
 use App\Mail\DemandeApprobationAssistance;
 use App\Mail\RefuserAssistance;
 use App\Models\Assistance;
@@ -223,7 +224,13 @@ class AssistanceController extends Controller
             'assistance'
         );
 
-        return sendResponse(new AssistanceResource($assistance->fresh()), 'Versement enregistré avec succès.');
+        // Email to the member (copy to the usual addresses), sent in the background.
+        $assistance = $assistance->fresh(['membre', 'typeAssistance']);
+        $this->safely(fn () => Mail::to($assistance->membre->email)
+            ->cc(EMAIL_COPIES)
+            ->queue(new AssistanceVersee($assistance)));
+
+        return sendResponse(new AssistanceResource($assistance), 'Versement enregistré avec succès.');
     }
 
     // ----------------------------------------------------------------- requests

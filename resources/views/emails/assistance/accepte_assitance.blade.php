@@ -37,11 +37,8 @@
                                     <li>Type d'assistance :
                                         <strong>{{ $assistance->typeAssistance->nom ?? 'N/A' }}</strong>
                                     </li>
-                                    <li>Montant demandé :
-                                        <strong>{{ number_format((float) $assistance->montant_demande, 0, ',', ' ') }} FBu</strong>
-                                    </li>
                                     <li>Montant accordé :
-                                        <strong>{{ number_format((float) $assistance->montant_accorde, 0, ',', ' ') }} FBu</strong>
+                                        <strong>{{ number_format((float) $assistance->montant, 0, ',', ' ') }} FBu</strong>
                                     </li>
                                 </ul>
                             </div>

@@ -28,7 +28,7 @@
                                 Nous sommes au regret de vous informer que votre demande d'assistance
                                 <strong>#{{ $assistance->id }}</strong> a été <strong>refusée</strong>
                                 le
-                                <strong>{{ \Carbon\Carbon::parse($assistance->date_approbation)->format('d/m/Y') }}</strong>.
+                                <strong>{{ \Carbon\Carbon::parse($assistance->updated_at ?? now())->format('d/m/Y') }}</strong>.
                             </p>
 
                             <div style="margin:18px 0;padding:16px;border:1px solid #e6e6ee;border-radius:6px;background:#fff7f7;">
@@ -38,7 +38,7 @@
                                         <strong>{{ $assistance->typeAssistance->nom ?? 'N/A' }}</strong>
                                     </li>
                                     <li>Montant demandé :
-                                        <strong>{{ number_format((float) $assistance->montant_demande, 0, ',', ' ') }} FBu</strong>
+                                        <strong>{{ number_format((float) $assistance->montant, 0, ',', ' ') }} FBu</strong>
                                     </li>
                                 </ul>
                             </div>

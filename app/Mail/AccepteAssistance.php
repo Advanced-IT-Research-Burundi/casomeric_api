@@ -29,7 +29,7 @@ class AccepteAssistance extends Mailable implements ShouldQueue
     public function envelope(): Envelope
     {
         return new Envelope(
-            subject: 'Accepte Assistance',
+            subject: "CASOMIREC – Votre demande d'assistance a été approuvée",
         );
     }
 
@@ -39,9 +39,9 @@ class AccepteAssistance extends Mailable implements ShouldQueue
     public function content(): Content
     {
         return new Content(
-            view: 'emails.accepte_assistance',
+            view: 'emails.assistance.accepte_assitance',
             with: [
-                'assistances' => $this->assistances
+                'assistance' => $this->assistances
             ]
         );
     }

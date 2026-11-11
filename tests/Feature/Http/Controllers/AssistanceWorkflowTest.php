@@ -2,6 +2,9 @@
 
 namespace Tests\Feature\Http\Controllers;
 
+use App\Mail\AccepteAssistance;
+use App\Mail\AssistanceVersee;
+use App\Mail\RefuserAssistance;
 use App\Models\Assistance;
 use App\Models\CategorieMembre;
 use App\Models\Configuration;
@@ -229,6 +232,12 @@ final class AssistanceWorkflowTest extends TestCase
         $this->assertFileExists(public_path($raw));
         @unlink(public_path($raw));
 
+        // The member is told by email that the money was paid.
+        Mail::assertQueued(AssistanceVersee::class, fn ($mail) => $mail->hasTo($assistance->membre->email)
+            && $mail->assistance->is($assistance));
+        // Approval email was queued at the final approval too.
+        Mail::assertQueued(AccepteAssistance::class);
+
         // The money left the fund, with a trace.
         $this->assertEquals(850000, app(CaisseService::class)->solde());
         $this->assertDatabaseHas('transactions', [
@@ -267,6 +276,23 @@ final class AssistanceWorkflowTest extends TestCase
         $this->assertSame($this->gestionnaire->id, $assistance->rejected_by);
 
         $this->postJson("/api/assistances/approuve/{$assistance->id}")->assertStatus(422);
+    }
+
+    // ---- Emails -------------------------------------------------------------
+
+    public function test_assistance_emails_render(): void
+    {
+        $assistance = $this->makeAssistance([
+            'statut' => 'verse',
+            'date_approbation' => now(),
+            'date_versement' => '2026-11-12',
+            'motif_rejet' => 'Dossier incomplet',
+        ]);
+
+        $this->assertStringContainsString('a été <strong>versée</strong>', (new AssistanceVersee($assistance))->render());
+        $this->assertStringContainsString('12/11/2026', (new AssistanceVersee($assistance))->render());
+        $this->assertStringContainsString('150 000', (new AccepteAssistance($assistance))->render());
+        $this->assertStringContainsString('refusée', (new RefuserAssistance($assistance))->render());
     }
 
     // ---- Caisse -------------------------------------------------------------

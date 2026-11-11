@@ -28,7 +28,7 @@ class RefuserAssistance extends Mailable implements ShouldQueue
     public function envelope(): Envelope
     {
         return new Envelope(
-            subject: 'Refuser Assistance',
+            subject: "CASOMIREC – Votre demande d'assistance a été refusée",
         );
     }
 
@@ -38,7 +38,7 @@ class RefuserAssistance extends Mailable implements ShouldQueue
     public function content(): Content
     {
         return new Content(
-            view: 'emails.refuser_assistance',
+            view: 'emails.assistance.refuser_assitance',
             with: [
                 'assistance' => $this->assistance
             ]
