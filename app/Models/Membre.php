@@ -69,6 +69,17 @@ class Membre extends Model
         return $this->hasMany(Assistance::class);
     }
 
+    /**
+     * Fiche membre de l'utilisateur connecté. Le membre est identifié par son matricule :
+     * c'est cette fiche qui porte le matricule utilisé pour retrouver ses cotisations.
+     */
+    public static function connecte(): ?self
+    {
+        $userId = auth()->id();
+
+        return $userId ? self::where('user_id', $userId)->first() : null;
+    }
+
     public function getFullNameAttribute(): string
     {
         return "{$this->nom} {$this->prenom}";

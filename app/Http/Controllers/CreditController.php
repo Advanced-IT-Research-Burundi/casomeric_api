@@ -15,6 +15,7 @@ use App\Models\Membre;
 use App\Models\Notification;
 use App\Models\User;
 use App\Models\Remboursement;
+use App\Models\Transaction;
 use App\Services\RemboursementService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -82,6 +83,7 @@ class CreditController extends Controller
                 );
             }
 
+            return sendResponse($credit, 'Crédit validé. L\'approbation du responsable est requise.');
         }else{
             try {
                 DB::beginTransaction();
@@ -101,12 +103,25 @@ class CreditController extends Controller
                 $credit->save();
                 $this->generateEcheances($credit->fresh());
 
-                 Notification::addNotification(
-                'Approbation de crédit a été faite par ' . auth()->user()->name . ' pour le membre ' . $credit->membre->nom . ' ' . $credit->membre->prenom . ' pour un montant de ' . $credit->montant_demande . ' BIF',
+                // Trace de l'argent qui sort de la caisse (comme pour le versement d'une assistance).
+                Transaction::create([
+                    'membre_id' => $credit->membre_id,
+                    'type_transaction' => 'credit',
+                    'reference_transaction' => $credit->id,
+                    'montant' => $credit->montant_accorde,
+                    'devise' => 'FBU',
+                    'sens' => 'sortie',
+                    'date_transaction' => now()->toDateString(),
+                    'description' => "Crédit n° {$credit->id} accordé depuis la caisse",
+                ]);
+
+                Notification::addNotification(
+                    'Votre crédit de ' . number_format((float) $credit->montant_accorde, 0, ',', ' ') . ' BIF a été approuvé par ' . auth()->user()->name
+                        . '. Mensualité : ' . number_format((float) $credit->montant_mensualite, 0, ',', ' ') . ' BIF sur ' . $credit->duree_mois . ' mois.',
                     $credit->membre->user_id,
-                'Demande d\'approbation de crédit',
-                'credit'
-            );
+                    'Crédit approuvé',
+                    'credit'
+                );
 
                 Mail::to($credit->membre->email)
                 ->cc(EMAIL_COPIES)
@@ -160,8 +175,9 @@ class CreditController extends Controller
             ->queue(new RefuserCredit($credit->load('membre')));
             Notification::create([
                 'type' => 'credit',
-                'title' => 'Credit rejeté',
-                'message' => 'Le credit a ete rejeté par ' . $credit->membre->nom . ' ' . $credit->membre->prenom . ' pour un montant de ' . $credit->montant_demande . ' BIF',
+                'title' => 'Crédit rejeté',
+                'message' => 'Votre demande de crédit de ' . number_format((float) $credit->montant_demande, 0, ',', ' ') . ' BIF a été rejetée par ' . $user->name
+                    . ($request->comment ? '. Motif : ' . $request->comment : '.'),
                 'time' => now(),
                 'read' => false,
                 'user_id' => Auth::id(),
@@ -170,7 +186,7 @@ class CreditController extends Controller
         } catch (\Throwable $th) {
             //throw $th;
         }
-        return sendResponse($credit, 'Credit refuser successfully.');
+        return sendResponse($credit, 'Crédit refusé avec succès.');
     }
     public function demandeCredit(Request $request)
     {
@@ -235,14 +251,14 @@ class CreditController extends Controller
                 'user_id' => Auth::id(),
             ]);
             
-            Notification::create([
-                'type' => 'credit',
-                'title' => 'Nouvelle demande de credit',
-                'message' => 'Une nouvelle demande de credit a ete effectuee par ' . $membre->nom . ' ' . $membre->prenom . ' pour un montant de ' . $request->montant_demande . ' BIF',
-                'time' => now(),
-                'read' => false,
-                'user_id' => Auth::id(),
-            ]);
+            // Même destinataires que l'e-mail : admins et gestionnaires (1re étape de validation).
+            User::whereIn('role', ['admin', 'gestionnaire'])->pluck('id')->each(fn ($id) => Notification::addNotification(
+                'Une nouvelle demande de crédit a été effectuée par ' . $membre->nom . ' ' . $membre->prenom
+                    . ' (matricule ' . $membre->matricule . ') pour un montant de ' . number_format((float) $request->montant_demande, 0, ',', ' ') . ' BIF',
+                $id,
+                'Nouvelle demande de crédit',
+                'credit'
+            ));
             DB::commit();
         } catch (\Throwable $th) {
             DB::rollBack();
@@ -258,14 +274,14 @@ class CreditController extends Controller
         }
         return sendResponse($credit, 'Credit created successfully.');
     }
-    public function mesCredits()
+    public function mesCredits(Request $request)
     {
         try {
             $membre = Membre::where('user_id', Auth::id())->first();
             if (!$membre) {
                 return sendError("Membre non trouvé.", [], Response::HTTP_NOT_FOUND);
             }
-            $credits = Credit::where('membre_id', $membre->id)->latest()->paginate();
+            $credits = Credit::where('membre_id', $membre->id)->latest()->paginate(min($request->integer('per_page', 15), 1000));
             return sendResponse($credits, 'Credits retrieved successfully.');
         } catch (\Exception $e) {
             return sendError($e->getMessage());

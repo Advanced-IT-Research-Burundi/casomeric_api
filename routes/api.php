@@ -55,54 +55,71 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/tokens', [UserController::class, 'tokens']);
     Route::delete('/tokens', [UserController::class, 'revokeToken']);
 
-    Route::apiResource('categorie-membres', CategorieMembreController::class);
-    Route::apiResource('categories', CategorieMembreController::class);
-    Route::apiResource('membres', MembreController::class);
-    Route::apiResource('cotisations', CotisationController::class);
-    Route::apiResource('configurations', ConfigurationController::class);
+    // Accessibles au membre (les contrôleurs limitent aux données du membre ou au personnel)
+    Route::apiResource('categorie-membres', CategorieMembreController::class)->only(['index', 'show']);
+    Route::apiResource('categories', CategorieMembreController::class)->only(['index', 'show']);
+    Route::apiResource('type-assistances', TypeAssistanceController::class)->only(['index', 'show']);
+    Route::apiResource('configurations', ConfigurationController::class)->only(['index', 'show']);
     Route::apiResource('credits', CreditController::class);
+    Route::apiResource('assistances', AssistanceController::class);
 
     Route::post("/credits/approuve/{id}", [CreditController::class, 'approuveCredit']);
     Route::post("/credits/rejete/{id}", [CreditController::class, 'refuserCredit']);
     Route::post("/credits/{id}/payer", [CreditController::class, 'payer']);
+    Route::post('assistances/approuve/{id}', [AssistanceController::class, 'approuve']);
+    Route::post('assistances/rejete/{id}', [AssistanceController::class, 'refuser']);
+    Route::post('assistances/{id}/verser', [AssistanceController::class, 'verser']);
+    Route::get('caisse', [\App\Http\Controllers\CaisseController::class, 'show']);
 
+    // Espace du membre
     Route::get('mescredits', [CreditController::class, 'mesCredits']);
     Route::post('demande-credit', [CreditController::class, 'demandeCredit']);
     Route::get('mescotisations', [CotisationController::class, 'mesCotisations']);
     Route::get('mes-assistances', [AssistanceController::class, 'mesAssistances']);
     Route::post('demande-assistance', [AssistanceController::class, 'demandeAssistance']);
-    Route::post('membres/search', [MembreController::class, 'search']);
-    Route::apiResource('remboursements', RemboursementController::class);
-    Route::post('remboursements/{remboursement}/approve', [RemboursementController::class, 'approve']);
-    Route::apiResource('type-assistances', TypeAssistanceController::class);
-    Route::apiResource('assistances', AssistanceController::class);
-    Route::post('assistances/approuve/{id}', [AssistanceController::class, 'approuve']);
-    Route::post('assistances/rejete/{id}', [AssistanceController::class, 'refuser']);
-    Route::post('assistances/{id}/verser', [AssistanceController::class, 'verser']);
-    Route::get('caisse', [\App\Http\Controllers\CaisseController::class, 'show']);
-    Route::apiResource('transactions', TransactionController::class);
-    Route::prefix('rapports')->group(function () {
-        Route::get('credits', [RapportController::class, 'getCreditReport']);
-        Route::get('assistances', [RapportController::class, 'getAssistanceReport']);
-        Route::get('remboursements', [RapportController::class, 'getRemboursementReport']);
-        Route::get('cotisations', [RapportController::class, 'getCotisationReport']);
-    });
-    Route::apiResource('rapports', RapportController::class);
-    Route::apiResource('configurations', ConfigurationController::class);
-    Route::apiResource('users', UserController::class);
-    Route::get('/dashboard', [DashboardController::class, 'getDashboardData']);
     Route::get('/dashboard-member', [DashboardController::class, 'dashboardMember']);
-    Route::get('/dashboard-assistance', [AssistanceController::class, 'dashboard']);
-    Route::get('/dashboard-cotisation', [CotisationController::class, 'dashboard']);
-    Route::post("importation", [ImportationController::class, 'cotisation']);
-    Route::apiResource("cotisation-mensuelles", CotisationMensuelleController::class);
 
     Route::apiResource('notifications', NotificationController::class);
     Route::put('notifications/{notification}/mark-read', [NotificationController::class, 'markAsRead']);
     Route::post('notifications/mark-all-read', [NotificationController::class, 'markAllAsRead']);
     Route::get('notifications-unread-count', [NotificationController::class, 'unreadCount']);
-    Route::get('cotisation_mensuelles', [CotisationController::class, 'cotisationMensuelles']);
-    Route::get('remboursements_mensuelles', [CotisationController::class, 'remboursementsMensuelles']);
-});
 
-Route::get('/update-database', [UpdateDBController::class, 'updateDatabase']);
+    // Gestion : réservé au personnel de la caisse
+    Route::middleware('role:admin,gestionnaire,responsable')->group(function () {
+        Route::post('membres/search', [MembreController::class, 'search']);
+        Route::apiResource('membres', MembreController::class);
+        Route::apiResource('cotisations', CotisationController::class);
+        Route::apiResource('remboursements', RemboursementController::class);
+        Route::post('remboursements/{remboursement}/approve', [RemboursementController::class, 'approve']);
+        Route::apiResource('transactions', TransactionController::class);
+        Route::prefix('rapports')->group(function () {
+            Route::get('credits', [RapportController::class, 'getCreditReport']);
+            Route::get('assistances', [RapportController::class, 'getAssistanceReport']);
+            Route::get('remboursements', [RapportController::class, 'getRemboursementReport']);
+            Route::get('cotisations', [RapportController::class, 'getCotisationReport']);
+            Route::get('etat-cotisations', [RapportController::class, 'getEtatCotisations']);
+            Route::get('debiteurs', [RapportController::class, 'getDebiteurs']);
+        });
+        Route::get('membres/{membre}/situation', [DashboardController::class, 'situationMembre']);
+        Route::apiResource('rapports', RapportController::class);
+        Route::get('/dashboard', [DashboardController::class, 'getDashboardData']);
+        Route::get('/dashboard-assistance', [AssistanceController::class, 'dashboard']);
+        Route::get('/dashboard-cotisation', [CotisationController::class, 'dashboard']);
+        Route::post("importation", [ImportationController::class, 'cotisation']);
+        Route::apiResource("cotisation-mensuelles", CotisationMensuelleController::class);
+        Route::get('cotisation_mensuelles', [CotisationController::class, 'cotisationMensuelles']);
+        Route::get('remboursements_mensuelles', [CotisationController::class, 'remboursementsMensuelles']);
+    });
+
+    // Administrateur seul : comptes utilisateurs (rôles) et paramètres de la caisse
+    // (montants des cotisations par catégorie, types et montants d'assistance, taux d'intérêt).
+    Route::middleware('role:admin')->group(function () {
+        Route::apiResource('categorie-membres', CategorieMembreController::class)->except(['index', 'show']);
+        Route::apiResource('categories', CategorieMembreController::class)->except(['index', 'show']);
+        Route::apiResource('type-assistances', TypeAssistanceController::class)->except(['index', 'show']);
+        Route::apiResource('configurations', ConfigurationController::class)->except(['index', 'show']);
+        Route::apiResource('users', UserController::class);
+        Route::put('users/{user}/toggle-status', [UserController::class, 'toggleStatus']);
+        Route::get('/update-database', [UpdateDBController::class, 'updateDatabase']);
+    });
+});

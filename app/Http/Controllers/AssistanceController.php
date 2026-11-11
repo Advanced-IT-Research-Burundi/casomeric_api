@@ -394,7 +394,7 @@ class AssistanceController extends Controller
             $query->orderBy("assistances.{$field}", $sortOrder);
         }
 
-        $perPage = min(100, max(1, (int) ($request->per_page ?? 15)));
+        $perPage = min(1000, max(1, (int) ($request->per_page ?? 15)));
 
         return sendResponse(
             $query->with(['membre', 'typeAssistance'])->paginate($perPage),
@@ -413,7 +413,7 @@ class AssistanceController extends Controller
         return sendResponse($assistance, "Détails de l'assistance récupérés avec succès.");
     }
 
-    public function mesAssistances()
+    public function mesAssistances(Request $request)
     {
         $membre = Membre::where('user_id', Auth::id())->first();
         if (!$membre) {
@@ -421,7 +421,7 @@ class AssistanceController extends Controller
         }
 
         return sendResponse(
-            Assistance::where('membre_id', $membre->id)->latest()->paginate(),
+            Assistance::with('typeAssistance')->where('membre_id', $membre->id)->latest()->paginate(min($request->integer('per_page', 15), 1000)),
             'Assistances retrieved successfully.'
         );
     }

@@ -31,6 +31,7 @@ class NotificationController extends Controller
         ]);
 
         $data['user_id'] = Auth::id();
+        $data['assignee_id'] = Auth::id();
         $data['read'] = $data['read'] ?? false;
 
         $notification = Notification::create($data);
@@ -74,6 +75,7 @@ class NotificationController extends Controller
     // POST /notifications/{notification}/mark-read
     public function markAsRead(Notification $notification)
     {
+        $this->authorizeOwner($notification);
         if (!$notification->read) {
             $notification->forceFill(['read' => true])->save();
         }
@@ -83,7 +85,7 @@ class NotificationController extends Controller
     // POST /notifications/mark-all-read
     public function markAllAsRead()
     {
-        Notification::where('user_id', Auth::id())
+        Notification::where('assignee_id', Auth::id())
             ->where('read', false)
             ->update(['read' => true]);
 
@@ -93,13 +95,14 @@ class NotificationController extends Controller
     // GET /notifications-unread-count
     public function unreadCount()
     {
-        $count = Notification::where('user_id', Auth::id())->where('read', false)->count();
+        $count = Notification::where('assignee_id', Auth::id())->where('read', false)->count();
         return sendResponse(['unread' => $count], 'Nombre de notifications non lues récupéré avec succès.');
     }
 
-    // Vérifie la propriété de la ressource
+    // Vérifie que la notification est destinée à l'utilisateur connecté (assignee_id).
+    // user_id est l'auteur de l'action, pas le destinataire.
     protected function authorizeOwner(Notification $notification): void
     {
-        abort_if($notification->user_id !== Auth::id(), Response::HTTP_FORBIDDEN, 'Accès refusé.');
+        abort_if((int) $notification->assignee_id !== (int) Auth::id(), Response::HTTP_FORBIDDEN, 'Accès refusé.');
     }
 }
