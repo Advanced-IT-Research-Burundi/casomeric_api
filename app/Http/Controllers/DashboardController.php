@@ -7,6 +7,7 @@ use App\Models\Cotisation;
 use App\Models\Credit;
 use App\Models\Membre;
 use App\Models\Remboursement;
+use App\Services\RappelCotisationService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
@@ -16,33 +17,42 @@ class DashboardController extends Controller
     //
     public function getDashboardData()
     {
-        // NOTE: this implementation assumes monetary columns are named 'montant'.
-        // If your schema uses another column name (e.g. 'amount'), replace 'montant' accordingly.
-
-        // Basic stats
-        $cotisationsCeMois = Cotisation::whereYear('created_at', now()->year)
-            ->whereMonth('created_at', now()->month)
+        // Cotisations encaissées (payées), rattachées au mois de la retenue (date_paiement).
+        $cotisationsPayees = fn () => Cotisation::whereIn('statut', ['paye', 'partiel']);
+        $cotisationsDuMois = fn (Carbon $mois) => (float) $cotisationsPayees()
+            ->whereYear('date_paiement', $mois->year)
+            ->whereMonth('date_paiement', $mois->month)
             ->sum('montant');
 
-        $cotisationsCumulees = Cotisation::sum('montant');
+        $cotisationsCeMois = $cotisationsDuMois(now());
+        $cotisationsMoisPrecedent = $cotisationsDuMois(now()->subMonthNoOverflow());
+        $evolutionCotisations = $cotisationsMoisPrecedent > 0
+            ? round(($cotisationsCeMois - $cotisationsMoisPrecedent) / $cotisationsMoisPrecedent * 100, 1)
+            : 0;
+        $cotisationsCumulees = (float) $cotisationsPayees()->sum('montant');
 
         $membresActifs = Membre::where('statut', 'actif')->count();
         $membresInactifs = Membre::where('statut', 'inactif')->count();
 
-        $creditsTotal = Credit::sum('montant_total_rembourser');
-        $creditsEnCours = Credit::where('statut', 'en cours')->count();
-
-        $dettesEnAttente = Remboursement::where('statut', 'en attente')->sum('montant_paye');
+        // Crédits dont l'argent est sorti de la caisse ("en_cours" avec date = données anciennes).
+        $creditsAccordes = fn () => Credit::where(function ($q) {
+            $q->whereIn('statut', ['approuve', 'termine'])
+                ->orWhere(fn ($q) => $q->where('statut', 'en_cours')->whereNotNull('date_approbation'));
+        });
+        $creditsTotal = (float) $creditsAccordes()->sum('montant_accorde');
+        $creditsEnCours = $creditsAccordes()->where('montant_restant', '>', 0)->count();
+        // Dettes à recouvrer : ce qui reste dû sur les crédits en remboursement.
+        $dettesEnAttente = (float) $creditsAccordes()->where('montant_restant', '>', 0)->sum('montant_restant');
 
         $demandesAssistance = Assistance::count();
-        $aidesAccordees = Assistance::where('statut', 'accordee')->count();
+        $aidesAccordees = Assistance::whereIn('statut', ['approuve', 'verse'])->count();
 
-        $totalRembourse = Remboursement::where('statut', 'rembourse')->sum('montant_paye');
-        $tauxRecouvrement = 0;
-        $baseRecouvrement = $totalRembourse + $dettesEnAttente;
-        if ($baseRecouvrement > 0) {
-            $tauxRecouvrement = round(($totalRembourse / $baseRecouvrement) * 100, 2);
-        }
+        // Taux de recouvrement : payé / dû sur les échéances arrivées à terme.
+        $echeancesEchues = Remboursement::whereDate('date_echeance', '<=', today());
+        $duEchu = (float) (clone $echeancesEchues)->sum('montant_prevu');
+        $tauxRecouvrement = $duEchu > 0
+            ? round(min(100, (float) (clone $echeancesEchues)->sum('montant_paye') / $duEchu * 100), 2)
+            : 0;
 
         // Solde de la caisse : même calcul que pour les versements d'assistance (CaisseService).
         $soldeDisponible = app(\App\Services\CaisseService::class)->solde();
@@ -57,13 +67,11 @@ class DashboardController extends Controller
         for ($i = 11; $i >= 0; $i--) {
             $dt = Carbon::now()->subMonths($i);
             $labels12[] = $dt->translatedFormat('M Y'); // ex: "déc. 2025" (requires locales)
-            $cotisationsValues[] = (float) Cotisation::whereYear('created_at', $dt->year)
-                ->whereMonth('created_at', $dt->month)
-                ->sum('montant');
+            $cotisationsValues[] = $cotisationsDuMois($dt);
 
-            $creditsValuesForTrend[] = (float) Credit::whereYear('created_at', $dt->year)
-                ->whereMonth('created_at', $dt->month)
-                ->sum('montant_total_rembourser');
+            $creditsValuesForTrend[] = (float) $creditsAccordes()->whereYear('date_approbation', $dt->year)
+                ->whereMonth('date_approbation', $dt->month)
+                ->sum('montant_accorde');
 
             $assistancesValuesForTrend[] = (float) Assistance::whereYear('created_at', $dt->year)
                 ->whereMonth('created_at', $dt->month)
@@ -77,12 +85,12 @@ class DashboardController extends Controller
         for ($i = 5; $i >= 0; $i--) {
             $dt = Carbon::now()->subMonths($i);
             $labels6[] = $dt->translatedFormat('M Y');
-            $creditsAccordes6[] = (float) Credit::whereYear('created_at', $dt->year)
-                ->whereMonth('created_at', $dt->month)
-                ->sum('montant_total_rembourser');
+            $creditsAccordes6[] = (float) $creditsAccordes()->whereYear('date_approbation', $dt->year)
+                ->whereMonth('date_approbation', $dt->month)
+                ->sum('montant_accorde');
 
-            $rembourses6[] = (float) Remboursement::whereYear('created_at', $dt->year)
-                ->whereMonth('created_at', $dt->month)
+            $rembourses6[] = (float) Remboursement::whereYear('date_paiement', $dt->year)
+                ->whereMonth('date_paiement', $dt->month)
                 ->sum('montant_paye');
         }
 
@@ -107,7 +115,7 @@ class DashboardController extends Controller
             'stats' => [
                 'cotisationsMois' => (float) $cotisationsCeMois,
                 'cotisationsCumulatif' => (float) $cotisationsCumulees,
-                'evolutionCotisations' => 0, // leave 0 or compute w/ previous month data if desired
+                'evolutionCotisations' => $evolutionCotisations,
                 'membresActifs' => $membresActifsCount,
                 'membresInactifs' => $membresInactifsCount,
                 'creditsTotal' => (float) $creditsTotal,
@@ -148,139 +156,105 @@ class DashboardController extends Controller
         return sendResponse($response, 'Dashboard data retrieved successfully.');
     }
 
-    function dashboardMember(Request $request)
+    /**
+     * Situation financière du membre connecté (identifié par son matricule).
+     */
+    function dashboardMember(Request $request, RappelCotisationService $rappels)
     {
-        $user = $request->user();
-        if (!$user) {
-            return response()->json(['success' => false, 'message' => 'Unauthenticated'], 401);
+        $membre = Membre::connecte();
+        if (!$membre) {
+            return sendError('Membre non trouvé.', [], 404);
         }
 
-        // KPI: member-specific
-        $cotisationsCeMois = (float) Cotisation::where('membre_id', $user->id)
-            ->whereYear('created_at', now()->year)
-            ->whereMonth('created_at', now()->month)
-            ->sum('montant');
+        return sendResponse($this->situation($membre, $rappels), 'Situation financière du membre récupérée avec succès.');
+    }
 
-        // Credits: total due, total paid, remaining
-        $creditsTotalDue = (float) Credit::where('membre_id', $user->id)->sum('montant_total_rembourser');
+    /** Situation financière d'un membre, consultée par le personnel (route réservée). */
+    public function situationMembre(Membre $membre, RappelCotisationService $rappels)
+    {
+        return sendResponse($this->situation($membre, $rappels), 'Situation financière du membre récupérée avec succès.');
+    }
 
-        $creditsId = Credit::where('membre_id', $user->id)->pluck('id')->toArray();
+    private function situation(Membre $membre, RappelCotisationService $rappels): array
+    {
 
-        $creditsTotalPaid = (float) Remboursement::whereIn('credit_id', $creditsId)->sum('montant_paye');
-        $creditsRemaining = max(0, $creditsTotalDue - $creditsTotalPaid);
+        $cotisations = fn () => Cotisation::duMembre($membre)->whereIn('statut', ['paye', 'partiel']);
 
-        // Montants reçus en assistance (for member)
-        $assistancesReceived = (float) Assistance::where('membre_id', $user->id)->sum('montant');
-
-        // Anomalies / retards
-        $anomaliesCount = (int) Credit::where('membre_id', $user->id)
+        // Crédits dont l'argent a été versé et qui sont en cours de remboursement ou terminés.
+        $credits = Credit::where('membre_id', $membre->id)
             ->where(function ($q) {
-                $q->where('statut', 'Anomalies')
-                    ->orWhere('statut', 'anomalie')
-                    ->orWhere('statut', 'anomalies');
-            })->count();
+                $q->whereIn('statut', ['approuve', 'termine'])
+                    ->orWhere(fn ($q) => $q->where('statut', 'en_cours')->whereNotNull('date_approbation'));
+            })
+            ->get();
+        $creditIds = $credits->pluck('id');
 
-        // Charts: last 12 months (cotisations / tendance) - member scope
+        $echeances = Remboursement::whereIn('credit_id', $creditIds);
+        $prochaineEcheance = (clone $echeances)
+            ->whereIn('statut', ['prevu', 'en_retard', 'partiel'])
+            ->orderBy('date_echeance')
+            ->first();
+
+        // Assistances réellement accordées (approuvées ou versées).
+        $assistances = fn () => Assistance::where('membre_id', $membre->id)->whereIn('statut', ['approuve', 'verse']);
+
+        $echeancesEnRetard = (clone $echeances)->where('statut', 'en_retard')->count();
+        // Périodes des 12 derniers mois sans cotisation enregistrée pour ce matricule
+        $membre->load('categorie');
+        $periodesNonPayees = $rappels->periodesNonPayees($membre);
+        $cotisationsEnRetard = count($periodesNonPayees);
+
+        // Cotisations et assistances des 12 derniers mois
         $labels12 = [];
         $cotisationsValues = [];
-        $creditsValuesForTrend = [];
-        $assistancesValuesForTrend = [];
-
+        $assistancesValues = [];
         for ($i = 11; $i >= 0; $i--) {
             $dt = Carbon::now()->subMonths($i);
             $labels12[] = $dt->translatedFormat('M Y');
-
-            $cotisationsValues[] = (float) Cotisation::where('membre_id', $user->id)
-                ->whereYear('created_at', $dt->year)
-                ->whereMonth('created_at', $dt->month)
+            $cotisationsValues[] = (float) $cotisations()
+                ->whereYear('date_paiement', $dt->year)
+                ->whereMonth('date_paiement', $dt->month)
                 ->sum('montant');
-
-            $creditsValuesForTrend[] = (float) Credit::where('membre_id', $user->id)
-                ->whereYear('created_at', $dt->year)
-                ->whereMonth('created_at', $dt->month)
-                ->sum('montant_total_rembourser');
-
-            $assistancesValuesForTrend[] = (float) Assistance::where('membre_id', $user->id)
-                ->whereYear('created_at', $dt->year)
-                ->whereMonth('created_at', $dt->month)
+            $assistancesValues[] = (float) $assistances()
+                ->whereYear('date_demande', $dt->year)
+                ->whereMonth('date_demande', $dt->month)
                 ->sum('montant');
-        }
-
-        // Credits vs remboursements (last 6 months) + statuses per month for this member
-        $labels6 = [];
-        $creditsAccordes6 = [];
-        $rembourses6 = [];
-        $creditsStatus6 = []; // array of status counts per month
-
-        for ($i = 5; $i >= 0; $i--) {
-            $dt = Carbon::now()->subMonths($i);
-            $labels6[] = $dt->translatedFormat('M Y');
-
-            $creditsAccordes6[] = (float) Credit::where('membre_id', $user->id)
-                ->whereYear('created_at', $dt->year)
-                ->whereMonth('created_at', $dt->month)
-                ->sum('montant_total_rembourser');
-
-            // $rembourses6[] = (float) Remboursement::where('membre_id', $user->id)
-            //     ->whereYear('created_at', $dt->year)
-            //     ->whereMonth('created_at', $dt->month)
-            //     ->sum('montant_paye');
-
-            // statuses counts grouped by statut
-            $statusRows = Credit::select('statut', DB::raw('COUNT(*) as total'))
-                ->where('membre_id', $user->id)
-                ->whereYear('created_at', $dt->year)
-                ->whereMonth('created_at', $dt->month)
-                ->groupBy('statut')
-                ->get()
-                ->pluck('total', 'statut')
-                ->toArray();
-
-            // normalize into known keys
-            $creditsStatus6[] = [
-                'approuve' => (int) ($statusRows['approuve'] ?? $statusRows['approuved'] ?? 0),
-                'en_cours' => (int) ($statusRows['en cours'] ?? $statusRows['en_cours'] ?? $statusRows['en-cours'] ?? 0),
-                'anomalies' => (int) ($statusRows['Anomalies'] ?? $statusRows['anomalies'] ?? $statusRows['anomalie'] ?? 0),
-                'refuse' => (int) ($statusRows['refuse'] ?? $statusRows['refusé'] ?? 0),
-                'autres' => (int) (array_sum($statusRows) - (
-                    ($statusRows['approuve'] ?? 0) +
-                    ($statusRows['en cours'] ?? 0) +
-                    ($statusRows['Anomalies'] ?? 0) +
-                    ($statusRows['refuse'] ?? 0)
-                )),
-            ];
         }
 
         $response = [
-            'success' => true,
+            'membre' => [
+                'matricule' => $membre->matricule,
+                'nom' => $membre->full_name,
+                'statut' => $membre->statut,
+            ],
             'stats' => [
-                'cotisationsMois' => $cotisationsCeMois,
-                'creditsTotal' => $creditsTotalDue,
-                'creditsTotalPaye' => $creditsTotalPaid,
-                'creditsEnCours' => $creditsRemaining,
-                'montantsAssistancesRecus' => $assistancesReceived,
-                'anomalies' => $anomaliesCount,
+                'cotisationsMois' => (float) $cotisations()
+                    ->whereYear('date_paiement', now()->year)
+                    ->whereMonth('date_paiement', now()->month)
+                    ->sum('montant'),
+                'cotisationsTotal' => (float) $cotisations()->sum('montant'),
+                'creditsTotal' => (float) $credits->sum('montant_total_rembourser'),
+                'creditsTotalPaye' => (float) (clone $echeances)->sum('montant_paye'),
+                'creditsEnCours' => (float) $credits->sum('montant_restant'),
+                'prochaineEcheance' => $prochaineEcheance ? [
+                    'credit_id' => $prochaineEcheance->credit_id,
+                    'numero' => $prochaineEcheance->numero_echeance,
+                    'date' => $prochaineEcheance->date_echeance,
+                    'montant' => max(0, (float) $prochaineEcheance->montant_prevu - (float) $prochaineEcheance->montant_paye),
+                ] : null,
+                'montantsAssistancesRecus' => (float) $assistances()->sum('montant'),
+                'echeancesEnRetard' => $echeancesEnRetard,
+                'cotisationsEnRetard' => $cotisationsEnRetard,
+                'periodesNonPayees' => $periodesNonPayees,
+                'anomalies' => $echeancesEnRetard + $cotisationsEnRetard,
             ],
             'charts' => [
-                'cotisations' => [
-                    'labels' => $labels12,
-                    'values' => $cotisationsValues,
-                ],
-                'credits' => [
-                    'labels' => $labels6,
-                    'accordes' => $creditsAccordes6,
-                    'rembourses' => $rembourses6 ?? [],
-                    'statuses' => $creditsStatus6, // per-month status breakdown for the member
-                ],
-                'tendance' => [
-                    'labels' => $labels12,
-                    'cotisations' => $cotisationsValues,
-                    'credits' => $creditsValuesForTrend,
-                    'assistances' => $assistancesValuesForTrend,
-                ],
+                'labels' => $labels12,
+                'cotisations' => $cotisationsValues,
+                'assistances' => $assistancesValues,
             ],
         ];
 
-        return sendResponse($response,"");
+        return $response;
     }
 }

@@ -18,6 +18,14 @@ class ImportationController extends Controller
 
     public function cotisation(Request $request)
     {
+        $request->validate([
+            'date_cotisation' => 'required|date',
+            'cotisations' => 'required|array|min:1',
+        ], [
+            'date_cotisation.required' => 'La date (mois) de la cotisation est obligatoire.',
+            'cotisations.required' => 'Le fichier importé ne contient aucune ligne.',
+        ]);
+
         $date = Carbon::parse($request->date_cotisation)->format('Y-m');
 
         // check if date already exists

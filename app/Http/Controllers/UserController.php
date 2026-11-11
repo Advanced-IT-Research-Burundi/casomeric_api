@@ -179,9 +179,16 @@ class UserController extends Controller
             'email' => ['sometimes', 'required', 'email', 'unique:users,email,' . $user->id],
             'telephone' => ['nullable', 'string', 'max:20'],
             'password' => ['nullable', 'confirmed', 'string'],
-            'role' => ['sometimes', 'in:admin,gestionnaire,membre'],
+            'role' => ['sometimes', 'in:admin,gestionnaire,membre,responsable'],
             'is_active' => ['sometimes', 'boolean'],
         ]);
+
+        // Un admin ne peut pas se retirer ses propres droits ni se désactiver.
+        if ($user->is($request->user())
+            && (($request->has('role') && $request->role !== $user->role)
+                || ($request->has('is_active') && !$request->boolean('is_active')))) {
+            return sendError('Vous ne pouvez pas modifier votre propre rôle ni désactiver votre propre compte.', [], 422);
+        }
 
         $data = $request->only(['nom', 'prenom', 'email', 'telephone', 'role']);
 
@@ -200,12 +207,38 @@ class UserController extends Controller
 
         $user->update($data);
 
+        // Un compte désactivé est déconnecté partout.
+        if ($user->wasChanged('is_active') && !$user->is_active) {
+            $user->tokens()->delete();
+        }
+
         return sendResponse($user->fresh(), 'Utilisateur mis à jour avec succès');
+    }
+
+    /** Active / suspend un compte. Un compte suspendu ne peut plus se connecter. */
+    public function toggleStatus(Request $request, User $user)
+    {
+        $request->validate(['is_active' => ['required', 'boolean']]);
+
+        if ($user->is($request->user())) {
+            return sendError('Vous ne pouvez pas désactiver votre propre compte.', [], 422);
+        }
+
+        $user->update(['is_active' => $request->boolean('is_active')]);
+        if (!$user->is_active) {
+            $user->tokens()->delete();
+        }
+
+        return sendResponse($user->fresh(), $user->is_active ? 'Utilisateur activé.' : 'Utilisateur suspendu.');
     }
 
     // ===== DELETE (Supprimer un utilisateur) =====
     public function destroy(Request $request, User $user)
     {
+        if ($user->is($request->user())) {
+            return sendError('Vous ne pouvez pas supprimer votre propre compte.', [], 422);
+        }
+
         // Optionnel : révoquer tous les tokens avant suppression
         try {
             $user->tokens()->delete();

@@ -10,6 +10,7 @@ use App\Models\Cotisation;
 use App\Models\CotisationMensuelle;
 use App\Models\Membre;
 use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\DB;
 
 class CotisationController extends Controller
@@ -132,13 +133,26 @@ for ($i=0; $i < count($membres); $i++) {
         return sendResponse($cotisation, 'Cotisation mise a jour avec succes');
     }
 
-    public function mesCotisations()
+    public function mesCotisations(Request $request)
     {
-        // get Member
-        $member = auth()->user()->membre;
-        $cotisations = CotisationMensuelle::where('matricule', $member->user_id)
-            ->latest()->paginate();
-        return sendResponse($cotisations, 'Cotisations retrieved successfully.');
+        $membre = Membre::connecte();
+        if (!$membre) {
+            return sendError('Membre non trouvé.', [], 404);
+        }
+
+        $query = Cotisation::duMembre($membre);
+
+        // Filtre par mois (format YYYY-MM)
+        if ($request->filled('date')) {
+            $mois = Carbon::parse($request->date . '-01');
+            $query->whereYear('date_paiement', $mois->year)
+                ->whereMonth('date_paiement', $mois->month);
+        }
+
+        $cotisations = $query->orderByDesc('date_paiement')->orderByDesc('id')
+            ->paginate(min($request->integer('per_page', 15), 1000));
+
+        return sendResponse($cotisations, 'Cotisations récupérées avec succès.');
     }
     public function index(Request $request)
     {
@@ -214,7 +228,7 @@ for ($i=0; $i < count($membres); $i++) {
     {
         try {
             DB::beginTransaction();
-             $cotisation = Cotisation::create($request->validated());
+             $cotisation = Cotisation::create($this->avecMatricule($request->validated()));
         // Writte to cotisation_mensuelles
         $cotisationMensuelle = CotisationMensuelle::create([
             'name' => $cotisation->membre?->nom . ' ' . $cotisation->membre?->prenom,
@@ -244,9 +258,19 @@ for ($i=0; $i < count($membres); $i++) {
 
     public function update(CotisationUpdateRequest $request, Cotisation $cotisation)
     {
-        $cotisation->update($request->validated());
+        $cotisation->update($this->avecMatricule($request->validated()));
 
         return sendResponse($cotisation, 'Cotisation mise à jour avec succès.');
+    }
+
+    /** Le membre est identifié par son matricule : on le copie sur la cotisation saisie. */
+    private function avecMatricule(array $data): array
+    {
+        if (!empty($data['membre_id'])) {
+            $data['matricule'] = Membre::whereKey($data['membre_id'])->value('matricule');
+        }
+
+        return $data;
     }
 
     public function destroy(Request $request, Cotisation $cotisation)

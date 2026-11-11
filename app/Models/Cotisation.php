@@ -56,4 +56,16 @@ class Cotisation extends Model
         return $this->belongsTo(Membre::class);
     }
 
+    /**
+     * Cotisations d'un membre, retrouvées par son matricule. Une cotisation importée
+     * avant la création de la fiche membre n'a pas de membre_id, seulement le matricule.
+     */
+    public function scopeDuMembre($query, Membre $membre)
+    {
+        return $query->where(function ($q) use ($membre) {
+            $q->where('matricule', $membre->matricule)
+                ->orWhere('membre_id', $membre->id);
+        });
+    }
+
 }
