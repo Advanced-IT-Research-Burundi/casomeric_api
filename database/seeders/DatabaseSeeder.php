@@ -104,15 +104,15 @@ class DatabaseSeeder extends Seeder
                 'nom' => 'service_externe_10',
                 'montant_cotisation' => 10,
                 'devise' => "USD",
-                'frequence_paiement' => "mensuel",
-                'description' => 'Service Externe (Cadres)',
+                'frequence_paiement' => "semestriel",
+                'description' => 'Service Externe (Cadres) — 10 USD/mois, encaissés semestriellement (60 USD).',
             ],
             [
                 'nom' => 'service_externe_5',
                 'montant_cotisation' => 5,
                 'devise' => "USD",
-                'frequence_paiement' => "mensuel",
-                'description' => 'Service Externe (Secrétaires d’ambassade)',
+                'frequence_paiement' => "semestriel",
+                'description' => 'Service Externe (Secrétaires d’ambassade) — 5 USD/mois, encaissés semestriellement (30 USD).',
             ],
         ];
 

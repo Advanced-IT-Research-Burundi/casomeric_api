@@ -62,9 +62,16 @@ class UpdateDatabase extends Command
                 'nom' => 'Service Externe (Cadres)',
                 'montant_cotisation' => 10,
                 'devise' => 'USD',
-                'frequence_paiement' => 'mensuel',
-                'description' => 'Service Externe (Cadres)'
+                'frequence_paiement' => 'semestriel',
+                'description' => 'Service Externe (Cadres) — 10 USD/mois, encaissés semestriellement (60 USD).'
                 
+            ],
+            [
+                'nom' => 'Service Externe (Secrétaires d’ambassade)',
+                'montant_cotisation' => 5,
+                'devise' => 'USD',
+                'frequence_paiement' => 'semestriel',
+                'description' => 'Service Externe (Secrétaires d’ambassade) — 5 USD/mois, encaissés semestriellement (30 USD).'
             ],
         ];
         

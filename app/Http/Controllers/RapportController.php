@@ -194,6 +194,10 @@ class RapportController extends Controller
                 ->whereIn('statut', ['paye', 'partiel'])
                 ->whereBetween('date_paiement', [$debut->toDateString(), $fin->toDateString()])
                 ->sum('montant');
+            $attendu = $rappels->montantAttendu($m);
+            $statut = $paye >= $attendu && $attendu > 0
+                ? 'paye'
+                : ($paye > 0 ? 'partiel' : 'non_paye');
 
             return [
                 'matricule' => $m->matricule,
@@ -201,9 +205,10 @@ class RapportController extends Controller
                 'categorie' => $m->categorie?->nom,
                 'periode' => $rappels->libellePeriode($m, $mois),
                 'devise' => $m->categorie?->devise ?? 'FBU',
-                'montant_attendu' => (float) ($m->categorie?->montant_cotisation ?? 0),
+                'montant_attendu' => $attendu,
                 'montant_paye' => $paye,
-                'statut' => $paye > 0 ? 'paye' : 'non_paye',
+                'montant_restant' => max(0, $attendu - $paye),
+                'statut' => $statut,
             ];
         })->values();
 
@@ -222,6 +227,7 @@ class RapportController extends Controller
             'libelle' => $mois->copy()->locale('fr')->translatedFormat('F Y'),
             'membres' => $lignes->count(),
             'payes' => $lignes->where('statut', 'paye')->count(),
+            'partiels' => $lignes->where('statut', 'partiel')->count(),
             'non_payes' => $lignes->where('statut', 'non_paye')->count(),
             'collecte_fbu' => $lignes->where('devise', 'FBU')->sum('montant_paye'),
             'collecte_usd' => $lignes->where('devise', 'USD')->sum('montant_paye'),

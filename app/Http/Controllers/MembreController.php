@@ -9,6 +9,7 @@ use App\Http\Resources\MembreCollection;
 use App\Http\Resources\MembreResource;
 use App\Jobs\SendWelcomeMailJob;
 use App\Models\Membre;
+use App\Models\CategorieMembre;
 use App\Models\User;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -21,7 +22,17 @@ class MembreController extends Controller
 {
     public function index(Request $request)
     {
-        $query = Membre::with('categorie');
+        // Include a stable category label in the list response. The UI must
+        // never need to display the internal categorie_id to identify a member.
+        $query = Membre::query()
+            ->select('membres.*')
+            ->selectSub(
+                CategorieMembre::query()
+                    ->select('nom')
+                    ->whereColumn('categorie_membres.id', 'membres.categorie_id'),
+                'categorie_nom'
+            )
+            ->with('categorie');
 
         // dd($query);
 

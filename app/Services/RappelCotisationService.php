@@ -41,6 +41,14 @@ class RappelCotisationService
             : $debut->copy()->locale('fr')->translatedFormat('F Y');
     }
 
+    /** Montant attendu pour une période : six mensualités pour un semestre. */
+    public function montantAttendu(Membre $membre): float
+    {
+        $montantMensuel = (float) ($membre->categorie?->montant_cotisation ?? 0);
+
+        return $this->estSemestriel($membre) ? $montantMensuel * 6 : $montantMensuel;
+    }
+
     /** Le membre doit-il une cotisation pour cette période ? (actif et adhérent avant la fin) */
     public function doitCotiser(Membre $membre, Carbon $mois): bool
     {
@@ -54,10 +62,14 @@ class RappelCotisationService
     {
         [$debut, $fin] = $this->periode($membre, $mois);
 
-        return Cotisation::duMembre($membre)
+        $montantPaye = (float) Cotisation::duMembre($membre)
             ->whereIn('statut', ['paye', 'partiel'])
             ->whereBetween('date_paiement', [$debut->toDateString(), $fin->toDateString()])
-            ->exists();
+            ->sum('montant');
+
+        $montantAttendu = $this->montantAttendu($membre);
+
+        return $montantAttendu > 0 && $montantPaye >= $montantAttendu;
     }
 
     /**
@@ -127,7 +139,7 @@ class RappelCotisationService
             }
 
             $montant = $membre->categorie
-                ? ' (' . number_format((float) $membre->categorie->montant_cotisation, 0, ',', ' ') . ' ' . $membre->categorie->devise . ')'
+                ? ' (' . number_format($this->montantAttendu($membre), 0, ',', ' ') . ' ' . $membre->categorie->devise . ')'
                 : '';
             $this->notifier(
                 $membre->user_id,
